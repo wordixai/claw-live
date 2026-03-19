@@ -1,0 +1,30 @@
+{
+  "id": "live-stream",
+  "name": "@openclaw/live-stream",
+  "version": "0.1.0",
+  "description": "Live stream overlay for Control UI — floating video player with danmaku, drag/resize, and stream controls.",
+  "extensions": ["./src/index.ts"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "streamUrl": {
+        "type": "string",
+        "description": "Default HLS stream URL (.m3u8)"
+      },
+      "roomTitle": {
+        "type": "string",
+        "description": "Default room title"
+      },
+      "autoStart": {
+        "type": "boolean",
+        "description": "Auto-start stream on gateway boot"
+      }
+    }
+  },
+  "uiHints": {
+    "streamUrl": { "label": "Stream URL", "placeholder": "https://example.com/live/stream.m3u8" },
+    "roomTitle": { "label": "Room Title", "placeholder": "OpenClaw Live" },
+    "autoStart": { "label": "Auto Start" }
+  }
+}

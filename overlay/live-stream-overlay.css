@@ -1,0 +1,346 @@
+/* ── OpenClaw Live Stream Floating Overlay ── */
+
+#oc-live-overlay {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 420px;
+  height: 340px;
+  min-width: 300px;
+  min-height: 220px;
+  z-index: 99999;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0f0f1a;
+  box-shadow:
+    0 8px 40px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s ease, height 0.3s ease, opacity 0.25s ease;
+  user-select: none;
+}
+
+#oc-live-overlay.oc-minimized {
+  width: 200px !important;
+  height: 40px !important;
+  min-height: 40px;
+  border-radius: 20px;
+}
+
+#oc-live-overlay.oc-minimized .oc-live-body,
+#oc-live-overlay.oc-minimized .oc-live-footer {
+  display: none;
+}
+
+#oc-live-overlay.oc-fullscreen {
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0;
+}
+
+#oc-live-overlay.oc-hidden {
+  display: none;
+}
+
+/* ── Header / drag handle ── */
+
+.oc-live-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  cursor: move;
+  flex-shrink: 0;
+}
+
+.oc-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+  flex-shrink: 0;
+}
+
+.oc-live-dot.oc-live-on {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+  animation: oc-pulse 2s ease-in-out infinite;
+}
+
+@keyframes oc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.oc-live-title {
+  flex: 1;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.oc-live-viewers {
+  color: #888;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.oc-live-controls {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.oc-live-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  color: #999;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+  line-height: 1;
+}
+
+.oc-live-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+/* ── Body: video + danmaku ── */
+
+.oc-live-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+.oc-live-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.oc-live-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #555;
+  font-size: 13px;
+}
+
+.oc-live-placeholder-icon {
+  font-size: 40px;
+  opacity: 0.4;
+}
+
+.oc-live-start-btn {
+  padding: 8px 20px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.oc-live-start-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: #ef4444;
+}
+
+/* ── Mode select / viewer waiting ── */
+
+#oc-mode-select {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+#oc-viewer-waiting {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+#oc-viewer-waiting .oc-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: #ef4444;
+  border-radius: 50%;
+  animation: oc-spin 0.8s linear infinite;
+  margin-bottom: 4px;
+}
+
+@keyframes oc-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Danmaku layer ── */
+
+.oc-danmaku-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.oc-danmaku-item {
+  position: absolute;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  animation: oc-danmaku-fly linear forwards;
+  pointer-events: none;
+}
+
+@keyframes oc-danmaku-fly {
+  from { transform: translateX(100%); }
+  to { transform: translateX(-100%); }
+}
+
+/* ── Footer: stats + input ── */
+
+.oc-live-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #111127;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.oc-live-stat {
+  color: #666;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.oc-live-stat b {
+  color: #aaa;
+  font-weight: 600;
+}
+
+.oc-danmaku-input {
+  flex: 1;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #ddd;
+  font-size: 11px;
+  padding: 0 12px;
+  outline: none;
+  transition: border-color 0.2s;
+  min-width: 0;
+}
+
+.oc-danmaku-input::placeholder {
+  color: #555;
+}
+
+.oc-danmaku-input:focus {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.oc-danmaku-send-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 13px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.oc-danmaku-send-btn:hover {
+  background: #dc2626;
+}
+
+/* ── Resize handle ── */
+
+.oc-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nw-resize;
+  z-index: 10;
+}
+
+.oc-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid rgba(255, 255, 255, 0.15);
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 2px 0 0 0;
+}
+
+/* ── Toggle button (when overlay is hidden) ── */
+
+#oc-live-toggle {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  z-index: 99998;
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+#oc-live-toggle:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 28px rgba(239, 68, 68, 0.5);
+}
+
+#oc-live-toggle.oc-visible {
+  display: flex;
+}

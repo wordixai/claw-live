@@ -1,0 +1,29 @@
+{
+  "name": "@openclaw/live-stream",
+  "version": "0.1.0",
+  "description": "Live stream overlay plugin for OpenClaw Control UI — floating video player with danmaku, drag/resize, and stream controls.",
+  "main": "src/index.ts",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "inject": "bash scripts/inject.sh",
+    "build": "tsc --noEmit"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "live-stream",
+    "danmaku",
+    "overlay"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}
