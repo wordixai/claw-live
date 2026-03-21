@@ -41,6 +41,11 @@
     return servers;
   }
 
+  let micPc = null;          // RTCPeerConnection for cohost audio
+  let micStream = null;      // viewer's local mic stream
+  let cohostViewerId = null;  // broadcaster: which viewer is co-hosting
+  let isCohostActive = false;
+
   let bubbleExpandTimer = null;
   let bubbleCollapseTimer = null;
 
@@ -84,7 +89,7 @@
 
 /* ── Container ── */
 #oc-live-overlay{
-  position:fixed;bottom:var(--oc-sp-6);right:var(--oc-sp-6);width:380px;height:340px;min-width:300px;min-height:260px;
+  position:fixed;bottom:var(--oc-sp-6);right:var(--oc-sp-6);width:380px;height:480px;min-width:300px;min-height:380px;
   z-index:99999;border-radius:var(--oc-radius);overflow:hidden;
   background:var(--oc-bg);
   box-shadow:0 8px 32px rgba(0,0,0,0.12),0 0 0 1px var(--oc-border);
@@ -182,6 +187,7 @@
 @keyframes oc-dot-blink{0%,100%{opacity:1;}50%{opacity:.3;}}
 .oc-viewer-card span{color:var(--oc-text-2);font-size:12px;font-weight:500;}
 .oc-viewer-card:hover span{color:var(--oc-text);}
+.oc-viewer-card{margin-bottom:var(--oc-sp-4);}
 
 /* ── Viewer Waiting ── */
 #oc-viewer-waiting{flex-direction:column;align-items:center;gap:var(--oc-sp-3);}
@@ -193,27 +199,93 @@
 .oc-danmaku-item{position:absolute;white-space:nowrap;font-size:14px;font-weight:600;text-shadow:0 1px 3px rgba(255,255,255,0.9),0 0 2px rgba(255,255,255,0.6);animation:oc-danmaku-fly linear forwards;pointer-events:none;}
 @keyframes oc-danmaku-fly{from{transform:translateX(100%);}to{transform:translateX(-100%);}}
 
+/* ── Chat Panel ── */
+.oc-chat-panel{
+  display:flex;flex-direction:column;flex-shrink:0;
+  border-top:1px solid var(--oc-border);background:var(--oc-bg);
+  height:140px;min-height:36px;
+  transition:height var(--oc-fast);overflow:hidden;
+}
+.oc-chat-panel.oc-chat-collapsed{height:36px;}
+.oc-chat-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 var(--oc-sp-4);height:36px;min-height:36px;flex-shrink:0;
+  background:var(--oc-bg);cursor:pointer;
+}
+.oc-chat-title{font-size:12px;font-weight:700;color:var(--oc-text);letter-spacing:.3px;}
+.oc-chat-toggle{
+  width:24px;height:24px;border:none;background:transparent;border-radius:var(--oc-radius-sm);
+  color:var(--oc-text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:all var(--oc-fast);padding:0;font-size:12px;
+}
+.oc-chat-toggle:hover{background:var(--oc-surface);color:var(--oc-text);}
+.oc-chat-panel.oc-chat-collapsed .oc-chat-toggle{transform:rotate(180deg);}
+.oc-chat-list{
+  flex:1;overflow-y:auto;overflow-x:hidden;padding:0 var(--oc-sp-3) var(--oc-sp-2);
+  scrollbar-width:thin;scrollbar-color:var(--oc-border) transparent;
+}
+.oc-chat-list::-webkit-scrollbar{width:4px;}
+.oc-chat-list::-webkit-scrollbar-track{background:transparent;}
+.oc-chat-list::-webkit-scrollbar-thumb{background:var(--oc-border);border-radius:2px;}
+.oc-chat-item{
+  display:flex;align-items:flex-start;gap:var(--oc-sp-2);
+  padding:var(--oc-sp-1) 0;animation:oc-chat-in var(--oc-fast) both;
+}
+@keyframes oc-chat-in{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+.oc-chat-avatar{
+  width:24px;height:24px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;color:#fff;
+  background:var(--oc-text-3);
+}
+.oc-chat-body{flex:1;min-width:0;}
+.oc-chat-meta{display:flex;align-items:baseline;gap:var(--oc-sp-2);}
+.oc-chat-sender{font-size:11px;font-weight:600;color:var(--oc-text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px;}
+.oc-chat-time{font-size:9px;color:var(--oc-text-3);white-space:nowrap;font-variant-numeric:tabular-nums;}
+.oc-chat-text{font-size:12px;color:var(--oc-text);line-height:1.4;word-break:break-word;margin-top:1px;}
+.oc-chat-empty{
+  display:flex;align-items:center;justify-content:center;height:100%;
+  color:var(--oc-text-3);font-size:11px;font-weight:500;
+}
+
+#oc-live-overlay.oc-minimized .oc-chat-panel{display:none;}
+#oc-live-overlay.oc-bubble .oc-chat-panel{display:none!important;}
+#oc-live-overlay.oc-fullscreen .oc-chat-panel{height:200px;}
+
 /* ── Footer ── */
 .oc-live-footer{
-  display:flex;align-items:center;gap:var(--oc-sp-2);
+  display:flex;align-items:center;gap:var(--oc-sp-3);
   padding:var(--oc-sp-3) var(--oc-sp-4);
-  background:var(--oc-bg-alt);border-top:1px solid var(--oc-border);flex-shrink:0;min-height:40px;
+  background:var(--oc-bg);border-top:1px solid var(--oc-border);flex-shrink:0;min-height:48px;
 }
-.oc-live-stat{color:var(--oc-text-3);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;}
+.oc-footer-stats{
+  display:flex;align-items:center;gap:var(--oc-sp-2);flex-shrink:0;
+  color:var(--oc-text-3);font-size:12px;font-variant-numeric:tabular-nums;
+}
+.oc-footer-stats .oc-stat-sep{
+  width:1px;height:14px;background:var(--oc-border);margin:0 2px;
+}
+.oc-live-stat{color:var(--oc-text-3);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:3px;}
 .oc-live-stat b{color:var(--oc-text-2);font-weight:600;}
-.oc-danmaku-input{
-  flex:1;height:30px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-pill);
-  background:#ffffff;color:var(--oc-text);font-size:12px;padding:0 var(--oc-sp-4);
-  outline:none;transition:all var(--oc-fast);min-width:0;
+.oc-dm-wrap{
+  flex:1;display:flex;align-items:center;min-width:0;
+  height:40px;border:1.5px solid transparent;border-radius:var(--oc-radius-pill);
+  background:var(--oc-surface);transition:all var(--oc-fast);padding:3px;box-sizing:border-box;
 }
+.oc-dm-wrap:focus-within{background:#ffffff;border-color:rgba(147,130,220,0.4);box-shadow:0 0 0 3px rgba(147,130,220,0.08);}
+.oc-danmaku-input{
+  flex:1;height:100%;border:none;border-radius:var(--oc-radius-pill);
+  background:transparent;color:var(--oc-text);font-size:13px;padding:0 var(--oc-sp-5);
+  outline:none;min-width:0;
+}
+.oc-danmaku-input:focus,.oc-danmaku-input:focus-visible{outline:none;border:none;box-shadow:none;}
 .oc-danmaku-input::placeholder{color:var(--oc-text-3);}
-.oc-danmaku-input:focus{border-color:rgba(229,57,53,0.4);background:#ffffff;box-shadow:0 0 0 3px rgba(229,57,53,0.06);}
 .oc-danmaku-send-btn{
-  height:30px;padding:0 var(--oc-sp-4);border:none;border-radius:var(--oc-radius-pill);
-  background:var(--oc-accent-g);color:#fff;font-size:12px;font-weight:600;
+  height:34px;padding:0 18px;border:none;border-radius:var(--oc-radius-pill);
+  background:var(--oc-accent);color:#fff;font-size:13px;font-weight:600;
   cursor:pointer;flex-shrink:0;transition:all var(--oc-fast);
 }
-.oc-danmaku-send-btn:hover{opacity:.88;transform:scale(1.03);}
+.oc-danmaku-send-btn:hover{opacity:.88;}
 .oc-danmaku-send-btn:active{transform:scale(.97);}
 
 /* ── Resize Handle ── */
@@ -267,15 +339,21 @@
   box-shadow:0 4px 24px rgba(0,0,0,0.15),0 0 0 3px rgba(229,57,53,0.4);
 }
 
-/* ── Source Badge ── */
+/* ── Source Badge (LIVE pill) ── */
 .oc-live-source-badge{
-  position:absolute;top:var(--oc-sp-2);left:var(--oc-sp-2);
-  padding:3px 10px;border-radius:var(--oc-radius-pill);
-  background:rgba(0,0,0,0.6);backdrop-filter:blur(8px);
-  color:rgba(255,255,255,0.88);font-size:10px;font-weight:600;letter-spacing:.3px;
+  position:absolute;top:var(--oc-sp-3);left:var(--oc-sp-3);z-index:4;
+  padding:4px 10px;border-radius:var(--oc-radius-pill);
+  background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
+  color:var(--oc-text-2);font-size:11px;font-weight:600;letter-spacing:.3px;
   display:none;pointer-events:none;
+  box-shadow:0 2px 8px rgba(0,0,0,0.08);
 }
-.oc-live-source-badge.oc-visible{display:block;animation:oc-badge-in var(--oc-norm) both;}
+.oc-live-badge-dot{
+  display:inline-block;width:8px;height:8px;border-radius:50%;
+  background:var(--oc-accent);margin-right:6px;flex-shrink:0;
+  box-shadow:0 0 6px var(--oc-accent);animation:oc-pulse 2s ease-in-out infinite;
+}
+.oc-live-source-badge.oc-visible{display:inline-flex;align-items:center;animation:oc-badge-in var(--oc-norm) both;}
 @keyframes oc-badge-in{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
 
 /* ── Stop / End Buttons ── */
@@ -288,15 +366,76 @@
 }
 .oc-live-stop-btn:hover{background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.35);}
 .oc-live-end-btn{
-  position:absolute;bottom:var(--oc-sp-2);right:var(--oc-sp-2);z-index:4;
-  padding:4px 12px;border:none;border-radius:var(--oc-radius-pill);
-  background:rgba(229,57,53,0.8);backdrop-filter:blur(12px);
-  color:#fff;font-size:11px;font-weight:600;cursor:pointer;
+  position:absolute;top:var(--oc-sp-3);right:var(--oc-sp-3);z-index:4;
+  padding:4px 10px;border:none;border-radius:var(--oc-radius-pill);
+  background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
+  color:var(--oc-text-2);font-size:11px;font-weight:600;cursor:pointer;
   transition:all var(--oc-fast);
-  box-shadow:0 2px 6px rgba(229,57,53,0.25);
+  box-shadow:0 2px 8px rgba(0,0,0,0.08);
 }
-.oc-live-end-btn:hover{background:rgba(229,57,53,1);box-shadow:0 4px 14px rgba(229,57,53,0.4);transform:scale(1.04);}
+.oc-live-end-btn:hover{background:#ffffff;color:var(--oc-text);box-shadow:0 4px 14px rgba(0,0,0,0.12);transform:scale(1.04);}
 .oc-live-end-btn:active{transform:scale(.96);}
+
+/* ── Audio Toggle ── */
+#oc-audio-unlock{
+  position:absolute;bottom:var(--oc-sp-3);right:var(--oc-sp-3);z-index:6;
+  width:32px;height:32px;padding:0;border:none;border-radius:50%;
+  background:rgba(0,0,0,0.52);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  color:#fff;cursor:pointer;
+  display:none;align-items:center;justify-content:center;
+  box-shadow:0 2px 8px rgba(0,0,0,0.2);
+  transition:background var(--oc-fast),transform var(--oc-fast);
+}
+#oc-audio-unlock:hover{background:rgba(0,0,0,0.8);transform:scale(1.12);}
+#oc-audio-unlock:active{transform:scale(.92);}
+#oc-live-overlay.oc-bubble #oc-audio-unlock{display:none!important;}
+#oc-live-overlay.oc-bubble #oc-mic-btn{display:none!important;}
+
+/* ── Cohost (连麦) ── */
+#oc-mic-btn{
+  position:absolute;bottom:var(--oc-sp-3);left:var(--oc-sp-3);z-index:6;
+  height:32px;padding:0 12px;border:none;border-radius:var(--oc-radius-pill);
+  background:rgba(0,0,0,0.52);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  color:#fff;cursor:pointer;font-size:12px;font-weight:600;font-family:var(--oc-font);
+  display:none;align-items:center;gap:5px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.2);
+  transition:background var(--oc-fast),transform var(--oc-fast);
+}
+#oc-mic-btn:hover{background:rgba(0,0,0,0.8);transform:scale(1.05);}
+#oc-mic-btn:active{transform:scale(.92);}
+#oc-mic-btn.oc-mic-active{background:rgba(229,57,53,0.85);}
+#oc-mic-btn.oc-mic-pending{background:rgba(255,152,0,0.75);pointer-events:none;}
+
+.oc-mic-request-popup{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;
+  background:rgba(255,255,255,0.97);backdrop-filter:blur(16px);
+  border-radius:var(--oc-radius);padding:var(--oc-sp-6);
+  box-shadow:0 12px 40px rgba(0,0,0,0.18),0 0 0 1px var(--oc-border);
+  display:flex;flex-direction:column;align-items:center;gap:var(--oc-sp-4);
+  min-width:220px;animation:oc-settings-in var(--oc-norm) both;
+}
+.oc-mic-request-title{font-size:14px;font-weight:700;color:var(--oc-text);}
+.oc-mic-request-sub{font-size:12px;color:var(--oc-text-2);text-align:center;}
+.oc-mic-request-actions{display:flex;gap:var(--oc-sp-3);width:100%;}
+.oc-mic-request-actions button{
+  flex:1;height:36px;border-radius:var(--oc-radius-sm);font-size:12px;font-weight:600;
+  cursor:pointer;border:none;transition:all var(--oc-fast);font-family:var(--oc-font);
+}
+.oc-mic-accept{background:var(--oc-green);color:#fff;}
+.oc-mic-accept:hover{opacity:.88;}
+.oc-mic-decline{background:var(--oc-surface);color:var(--oc-text-2);border:1px solid var(--oc-border)!important;}
+.oc-mic-decline:hover{background:var(--oc-border);}
+
+.oc-cohost-badge{
+  position:absolute;top:var(--oc-sp-3);right:60px;z-index:6;
+  padding:4px 10px;border-radius:var(--oc-radius-pill);
+  background:rgba(46,125,50,0.9);color:#fff;font-size:11px;font-weight:600;
+  display:none;align-items:center;gap:5px;
+  animation:oc-badge-in var(--oc-norm) both;
+}
+.oc-cohost-badge .oc-cohost-dot{
+  width:6px;height:6px;border-radius:50%;background:#fff;animation:oc-pulse 2s ease-in-out infinite;
+}
 
 /* ── Settings Panel ── */
 .oc-settings-panel{
@@ -337,7 +476,8 @@
       <span class="oc-live-title" id="oc-title">OpenClaw Live</span>
       <span class="oc-live-viewers" id="oc-viewers"></span>
       <div class="oc-live-controls">
-        <button class="oc-live-btn" id="oc-btn-settings" title="设置"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>
+        <button class="oc-live-btn" id="oc-btn-settings" title="设置" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>
+        <button class="oc-live-btn" id="oc-btn-bubble" title="悬浮窗" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/></svg></button>
         <button class="oc-live-btn" id="oc-btn-min" title="最小化"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="oc-live-btn" id="oc-btn-fs" title="全屏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg></button>
         <button class="oc-live-btn" id="oc-btn-close" title="隐藏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -347,19 +487,19 @@
       <video class="oc-live-video" id="oc-video" autoplay muted playsinline></video>
       <div class="oc-live-placeholder" id="oc-placeholder">
         <div id="oc-mode-select">
-          <span class="oc-mode-label">选择模式</span>
-          <div class="oc-mode-actions">
+          <span class="oc-mode-label" id="oc-mode-label">直播间</span>
+          <div class="oc-mode-actions" id="oc-host-actions" style="display:none;">
             <div class="oc-action-card" id="oc-btn-camera">
-              <div class="oc-action-icon oc-red">📷</div>
+              <div class="oc-action-icon oc-red"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></div>
               <span class="oc-action-name">开播</span>
             </div>
             <div class="oc-action-card" id="oc-btn-screen">
-              <div class="oc-action-icon oc-blue">🖥</div>
+              <div class="oc-action-icon oc-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg></div>
               <span class="oc-action-name">共享屏幕</span>
             </div>
           </div>
-          <div class="oc-mode-divider"></div>
-          <div class="oc-viewer-card" id="oc-btn-viewer">
+          <div class="oc-mode-divider" id="oc-mode-divider" style="display:none;"></div>
+          <div class="oc-viewer-card" id="oc-btn-viewer" style="display:none;">
             <div class="oc-viewer-dot"></div>
             <span>进入观看</span>
           </div>
@@ -372,7 +512,10 @@
       </div>
       <div class="oc-danmaku-layer" id="oc-danmaku"></div>
       <div class="oc-live-source-badge" id="oc-source-badge"></div>
-      <button class="oc-live-end-btn" id="oc-btn-end">关播</button>
+      <button class="oc-live-end-btn" id="oc-btn-end">结束直播</button>
+      <button id="oc-audio-unlock" title="点击开启音频"></button>
+      <button id="oc-mic-btn" title="连麦"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg><span>连麦</span></button>
+      <div class="oc-cohost-badge" id="oc-cohost-badge"><span class="oc-cohost-dot"></span>连麦中</div>
       <div class="oc-settings-panel" id="oc-settings" style="display:none;">
         <div class="oc-settings-title">⚙ 连接设置</div>
         <label class="oc-settings-label">信令服务器地址
@@ -400,13 +543,27 @@
         </div>
       </div>
     </div>
+    <div class="oc-chat-panel" id="oc-chat-panel">
+      <div class="oc-chat-header" id="oc-chat-header">
+        <span class="oc-chat-title">Live Chat</span>
+        <button class="oc-chat-toggle" id="oc-chat-toggle"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+      </div>
+      <div class="oc-chat-list" id="oc-chat-list">
+        <div class="oc-chat-empty" id="oc-chat-empty">暂无消息</div>
+      </div>
+    </div>
     <div class="oc-live-footer">
-      <span class="oc-live-stat" id="oc-stat-duration">00:00</span>
-      <span class="oc-live-stat" id="oc-stat-dm">💬 <b>0</b></span>
-      <span class="oc-live-stat" id="oc-stat-role" style="color:var(--oc-accent,#ef4444);font-weight:600;"></span>
-      <button class="oc-live-stop-btn" id="oc-btn-stop">关播</button>
-      <input class="oc-danmaku-input" id="oc-dm-input" placeholder="发弹幕..." />
-      <button class="oc-danmaku-send-btn" id="oc-dm-send">发送</button>
+      <div class="oc-footer-stats">
+        <span class="oc-live-stat" id="oc-stat-duration">00:00</span>
+        <span class="oc-stat-sep"></span>
+        <span class="oc-live-stat" id="oc-stat-dm"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg><b>0</b></span>
+      </div>
+      <span class="oc-live-stat" id="oc-stat-role" style="color:var(--oc-accent,#ef4444);font-weight:600;display:none;"></span>
+      <button class="oc-live-stop-btn" id="oc-btn-stop" style="display:none;">关播</button>
+      <div class="oc-dm-wrap">
+        <input class="oc-danmaku-input" id="oc-dm-input" placeholder="发弹幕..." />
+        <button class="oc-danmaku-send-btn" id="oc-dm-send">发送</button>
+      </div>
     </div>
   `;
   document.body.appendChild(overlay);
@@ -431,10 +588,12 @@
   const statRole = $("oc-stat-role");
   const dmInput = $("oc-dm-input");
   const stopBtn = $("oc-btn-stop");
+  const bubbleBtn = $("oc-btn-bubble");
   const sourceBadge = $("oc-source-badge");
   const modeSelect = $("oc-mode-select");
   const viewerWaiting = $("oc-viewer-waiting");
   const endBtn = $("oc-btn-end");
+  const audioUnlockBtn = $("oc-audio-unlock");
   const settingsPanel = $("oc-settings");
   const cfgSignalHost = $("oc-cfg-signal-host");
   const cfgSignalPort = $("oc-cfg-signal-port");
@@ -442,12 +601,18 @@
   const cfgTurnServer = $("oc-cfg-turn-server");
   const cfgTurnUser = $("oc-cfg-turn-user");
   const cfgTurnPass = $("oc-cfg-turn-pass");
+  const chatPanel = $("oc-chat-panel");
+  const chatList = $("oc-chat-list");
+  const chatEmpty = $("oc-chat-empty");
+  const micBtn = $("oc-mic-btn");
+  const cohostBadge = $("oc-cohost-badge");
 
   // ── Initialize UI state ──
   video.style.display = "none";
   placeholder.style.display = "flex";
   endBtn.style.display = "none";
   stopBtn.style.display = "none";
+
 
   // ── Config (localStorage) ──
 
@@ -576,13 +741,13 @@
 
       case "viewer-count":
         viewerCount = msg.count;
-        viewersEl.textContent = `👁 ${viewerCount}`;
+        updateViewerBadge();
         break;
 
       case "stream-info":
         if (msg.title) titleEl.textContent = msg.title;
         if (msg.viewerCount != null) viewerCount = msg.viewerCount;
-        viewersEl.textContent = `👁 ${viewerCount}`;
+        updateViewerBadge();
         break;
 
       // ── Broadcaster receives ──
@@ -625,9 +790,12 @@
 
       case "broadcaster-left": {
         const wasBubble = overlay.classList.contains("oc-bubble");
+        cleanupCohost();
         if (viewerPc) { viewerPc.close(); viewerPc = null; }
         video.srcObject = null;
         isLive = false;
+        audioUnlockBtn.style.display = "none";
+        micBtn.style.display = "none";
         exitBubbleMode();
         updateUI(null);
         viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播已离开，等待重新开播</span>';
@@ -642,7 +810,38 @@
       }
 
       case "danmaku":
-        spawnDanmaku(msg.text, msg.color);
+        spawnDanmaku(msg.text, msg.color, msg.sender);
+        break;
+
+      // ── Cohost (连麦) ──
+      case "mic-request":
+        showMicRequestPopup(msg.viewerId);
+        break;
+
+      case "mic-accept":
+        onMicAccepted();
+        break;
+
+      case "mic-reject":
+        onMicRejected();
+        break;
+
+      case "mic-offer":
+        handleMicOffer(msg.viewerId, msg.sdp);
+        break;
+
+      case "mic-answer":
+        handleMicAnswer(msg.sdp);
+        break;
+
+      case "mic-ice":
+        if (micPc && msg.candidate) {
+          micPc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+        }
+        break;
+
+      case "mic-stop":
+        onMicStopped(msg.viewerId);
         break;
 
       case "error":
@@ -698,13 +897,16 @@
 
     viewerPc.ontrack = (e) => {
       video.srcObject = e.streams[0];
-      video.muted = false;
+      video.muted = true;
       video.play().catch(() => {});
       isLive = true;
       startedAt = startedAt || Date.now();
       placeholder.style.display = "none";
       video.style.display = "block";
       updateUI("📡 观看中");
+      audioUnlockBtn.style.display = "flex";
+      micBtn.style.display = "flex";
+      syncAudioBtn();
       setTimeout(() => enterBubbleMode(), 500);
     };
 
@@ -782,6 +984,7 @@
     clearTimeout(bubbleExpandTimer);
     clearTimeout(bubbleCollapseTimer);
     exitBubbleMode();
+    cleanupCohost();
     if (localStream) {
       localStream.getTracks().forEach((t) => t.stop());
       localStream = null;
@@ -789,11 +992,13 @@
     for (const pc of Object.values(peerConnections)) pc.close();
     peerConnections = {};
     if (viewerPc) { viewerPc.close(); viewerPc = null; }
-    if (signalEs && role === "broadcaster") { signalEs.close(); signalEs = null; myClientId = null; }
+    if (signalEs) { signalEs.close(); signalEs = null; myClientId = null; }
     video.srcObject = null;
     isLive = false;
     startedAt = null;
     role = null;
+    audioUnlockBtn.style.display = "none";
+    micBtn.style.display = "none";
     if (durationTimer) clearInterval(durationTimer);
     statRole.textContent = "";
     updateUI(null);
@@ -807,16 +1012,30 @@
 
   // ── UI ──
 
+  function updateViewerBadge() {
+    const text = `LIVE (${viewerCount})`;
+    sourceBadge.innerHTML = `<span class="oc-live-badge-dot"></span>${text}`;
+  }
+
   function updateUI(sourceLabel) {
     dot.className = "oc-live-dot" + (isLive ? " oc-live-on" : "");
-    viewersEl.textContent = isLive ? `👁 ${viewerCount}` : "";
+    viewersEl.textContent = "";
     placeholder.style.display = isLive ? "none" : "flex";
     video.style.display = isLive ? "block" : "none";
     stopBtn.style.display = (isLive && role === "broadcaster") ? "block" : "none";
-    endBtn.style.display = (isLive && role === "broadcaster") ? "block" : "none";
+    if (isLive && role === "broadcaster") {
+      endBtn.textContent = "结束直播";
+      endBtn.style.display = "block";
+    } else if (isLive && role === "viewer") {
+      endBtn.textContent = "停止观看";
+      endBtn.style.display = "block";
+    } else {
+      endBtn.style.display = "none";
+    }
+    bubbleBtn.style.display = isLive ? "flex" : "none";
 
     if (sourceLabel) {
-      sourceBadge.textContent = sourceLabel;
+      updateViewerBadge();
       sourceBadge.classList.add("oc-visible");
     } else {
       sourceBadge.classList.remove("oc-visible");
@@ -845,7 +1064,35 @@
 
   // ── Danmaku ──
 
-  function spawnDanmaku(text, color) {
+  const CHAT_MAX = 100;
+  const AVATAR_COLORS = ["#e53935","#1976d2","#2e7d32","#f57c00","#7b1fa2","#00838f","#c62828","#283593","#558b2f","#4e342e"];
+
+  function avatarColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+  }
+
+  function appendChatMessage(sender, text, color) {
+    if (chatEmpty.style.display !== "none") chatEmpty.style.display = "none";
+    const item = document.createElement("div");
+    item.className = "oc-chat-item";
+    const initial = (sender || "?")[0].toUpperCase();
+    const bg = avatarColor(sender || "?");
+    const now = new Date();
+    const ts = String(now.getHours()).padStart(2,"0") + ":" + String(now.getMinutes()).padStart(2,"0");
+    item.innerHTML =
+      `<div class="oc-chat-avatar" style="background:${bg}">${initial}</div>` +
+      `<div class="oc-chat-body">` +
+        `<div class="oc-chat-meta"><span class="oc-chat-sender">${sender || "匿名"}</span><span class="oc-chat-time">${ts}</span></div>` +
+        `<div class="oc-chat-text">${text.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</div>` +
+      `</div>`;
+    chatList.appendChild(item);
+    while (chatList.children.length > CHAT_MAX + 1) chatList.removeChild(chatList.children[1]);
+    chatList.scrollTop = chatList.scrollHeight;
+  }
+
+  function spawnDanmaku(text, color, sender) {
     const el = document.createElement("span");
     el.className = "oc-danmaku-item";
     el.textContent = text;
@@ -858,20 +1105,191 @@
     danmakuLayer.appendChild(el);
     el.addEventListener("animationend", () => el.remove());
     danmakuCount++;
-    statDm.innerHTML = `💬 <b>${danmakuCount}</b>`;
+    statDm.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:2px;"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg><b>${danmakuCount}</b>`;
+    appendChatMessage(sender, text, color);
   }
 
   function sendDanmaku() {
     const text = dmInput.value.trim();
     if (!text) return;
     const color = randomColor();
-    sendSignal({ type: "danmaku", text, sender: role === "broadcaster" ? "主播" : (myViewerId || "观众"), color });
+    const sender = role === "broadcaster" ? "主播" : (myViewerId || "观众");
+    sendSignal({ type: "danmaku", text, sender, color });
     dmInput.value = "";
   }
 
   function randomColor() {
     const c = ["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#ff922b","#cc5de8","#20c997","#ffffff","#ffa94d","#74c0fc"];
     return c[Math.floor(Math.random() * c.length)];
+  }
+
+  // ══════════════════════════════════
+  //  Cohost (连麦) Logic
+  // ══════════════════════════════════
+
+  // ── Viewer: request cohost ──
+  function requestMic() {
+    if (isCohostActive) {
+      stopCohost();
+      return;
+    }
+    micBtn.classList.add("oc-mic-pending");
+    micBtn.querySelector("span").textContent = "请求中…";
+    sendSignal({ type: "mic-request" });
+  }
+
+  // ── Viewer: broadcaster accepted ──
+  async function onMicAccepted() {
+    micBtn.classList.remove("oc-mic-pending");
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      micBtn.classList.remove("oc-mic-pending", "oc-mic-active");
+      micBtn.querySelector("span").textContent = "连麦";
+      alert("无法访问麦克风: " + err.message);
+      sendSignal({ type: "mic-stop" });
+      return;
+    }
+
+    micPc = new RTCPeerConnection({ iceServers: getIceServers() });
+    micStream.getTracks().forEach((t) => micPc.addTrack(t, micStream));
+
+    micPc.onicecandidate = (e) => {
+      if (e.candidate) sendSignal({ type: "mic-ice", candidate: e.candidate });
+    };
+    micPc.onconnectionstatechange = () => {
+      if (micPc && (micPc.connectionState === "failed" || micPc.connectionState === "disconnected")) {
+        stopCohost();
+      }
+    };
+
+    const offer = await micPc.createOffer();
+    await micPc.setLocalDescription(offer);
+    sendSignal({ type: "mic-offer", sdp: offer.sdp });
+
+    isCohostActive = true;
+    micBtn.classList.add("oc-mic-active");
+    micBtn.querySelector("span").textContent = "结束连麦";
+    cohostBadge.style.display = "flex";
+  }
+
+  // ── Viewer: broadcaster rejected ──
+  function onMicRejected() {
+    micBtn.classList.remove("oc-mic-pending");
+    micBtn.querySelector("span").textContent = "连麦";
+    appendChatMessage("系统", "主播拒绝了连麦请求", "#999");
+  }
+
+  // ── Viewer: handle answer from broadcaster ──
+  async function handleMicAnswer(sdp) {
+    if (!micPc) return;
+    await micPc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp }));
+  }
+
+  // ── Broadcaster: show mic request popup ──
+  function showMicRequestPopup(viewerId) {
+    const existing = document.querySelector(".oc-mic-request-popup");
+    if (existing) existing.remove();
+
+    if (isCohostActive) {
+      sendSignal({ type: "mic-reject", viewerId });
+      return;
+    }
+
+    if (overlay.classList.contains("oc-bubble")) {
+      exitBubbleMode();
+    }
+
+    const popup = document.createElement("div");
+    popup.className = "oc-mic-request-popup";
+    popup.innerHTML =
+      '<div class="oc-mic-request-title">🎤 连麦请求</div>' +
+      '<div class="oc-mic-request-sub">观众 ' + viewerId + ' 请求连麦</div>' +
+      '<div class="oc-mic-request-actions">' +
+        '<button class="oc-mic-accept" id="oc-mic-popup-accept">同意</button>' +
+        '<button class="oc-mic-decline" id="oc-mic-popup-decline">拒绝</button>' +
+      '</div>';
+    overlay.appendChild(popup);
+
+    var autoRejectTimer = setTimeout(function () {
+      popup.remove();
+      sendSignal({ type: "mic-reject", viewerId: viewerId });
+    }, 15000);
+
+    popup.querySelector("#oc-mic-popup-accept").addEventListener("click", function () {
+      clearTimeout(autoRejectTimer);
+      popup.remove();
+      cohostViewerId = viewerId;
+      sendSignal({ type: "mic-accept", viewerId: viewerId });
+      cohostBadge.style.display = "flex";
+      isCohostActive = true;
+    });
+
+    popup.querySelector("#oc-mic-popup-decline").addEventListener("click", function () {
+      clearTimeout(autoRejectTimer);
+      popup.remove();
+      sendSignal({ type: "mic-reject", viewerId: viewerId });
+    });
+  }
+
+  // ── Broadcaster: handle viewer's mic offer ──
+  async function handleMicOffer(viewerId, sdp) {
+    if (micPc) { micPc.close(); micPc = null; }
+
+    micPc = new RTCPeerConnection({ iceServers: getIceServers() });
+
+    micPc.onicecandidate = (e) => {
+      if (e.candidate) sendSignal({ type: "mic-ice", viewerId: viewerId, candidate: e.candidate });
+    };
+
+    micPc.ontrack = (e) => {
+      var audio = document.createElement("audio");
+      audio.id = "oc-cohost-audio";
+      audio.srcObject = e.streams[0];
+      audio.autoplay = true;
+      document.body.appendChild(audio);
+    };
+
+    micPc.onconnectionstatechange = () => {
+      if (micPc && (micPc.connectionState === "failed" || micPc.connectionState === "disconnected")) {
+        stopCohost();
+      }
+    };
+
+    await micPc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp }));
+    var answer = await micPc.createAnswer();
+    await micPc.setLocalDescription(answer);
+    sendSignal({ type: "mic-answer", viewerId: viewerId, sdp: answer.sdp });
+  }
+
+  // ── Both: remote side stopped ──
+  function onMicStopped(viewerId) {
+    cleanupCohost();
+    appendChatMessage("系统", viewerId ? "观众 " + viewerId + " 结束了连麦" : "主播结束了连麦", "#999");
+  }
+
+  // ── Both: actively stop cohost ──
+  function stopCohost() {
+    if (role === "broadcaster" && cohostViewerId) {
+      sendSignal({ type: "mic-stop", viewerId: cohostViewerId });
+    } else if (role === "viewer") {
+      sendSignal({ type: "mic-stop" });
+    }
+    cleanupCohost();
+  }
+
+  function cleanupCohost() {
+    if (micPc) { micPc.close(); micPc = null; }
+    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+    var cohostAudio = document.getElementById("oc-cohost-audio");
+    if (cohostAudio) cohostAudio.remove();
+    isCohostActive = false;
+    cohostViewerId = null;
+    cohostBadge.style.display = "none";
+    micBtn.classList.remove("oc-mic-active", "oc-mic-pending");
+    micBtn.querySelector("span").textContent = "连麦";
+    var popup = document.querySelector(".oc-mic-request-popup");
+    if (popup) popup.remove();
   }
 
   // ── Event Listeners ──
@@ -883,9 +1301,33 @@
     viewerWaiting.style.display = "flex";
     connectSignal("viewer");
   });
+  const SVG_VOL_ON  = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
+  const SVG_VOL_OFF = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+
+  function syncAudioBtn() {
+    if (video.muted) {
+      audioUnlockBtn.innerHTML = SVG_VOL_OFF;
+      audioUnlockBtn.title = "已静音，点击开启音频";
+    } else {
+      audioUnlockBtn.innerHTML = SVG_VOL_ON;
+      audioUnlockBtn.title = "点击静音";
+    }
+  }
+
+  audioUnlockBtn.addEventListener("click", () => {
+    video.muted = !video.muted;
+    if (!video.muted) video.play().catch(() => {});
+    syncAudioBtn();
+  });
+
+  micBtn.addEventListener("click", requestMic);
+
   stopBtn.addEventListener("click", stopLive);
   endBtn.addEventListener("click", stopLive);
 
+  $("oc-chat-header").addEventListener("click", () => chatPanel.classList.toggle("oc-chat-collapsed"));
+
+  bubbleBtn.addEventListener("click", () => { if (isLive) enterBubbleMode(); });
   $("oc-btn-min").addEventListener("click", () => overlay.classList.toggle("oc-minimized"));
   $("oc-btn-fs").addEventListener("click", () => overlay.classList.toggle("oc-fullscreen"));
   $("oc-btn-close").addEventListener("click", () => {
@@ -900,19 +1342,7 @@
     if (isLive) enterBubbleMode();
   });
 
-  // ── Bubble Mode: click to expand, mouse-leave to collapse, drag to move ──
-
-  overlay.addEventListener("mouseleave", () => {
-    clearTimeout(bubbleExpandTimer);
-    if (!isLive || overlay.classList.contains("oc-fullscreen")) return;
-    bubbleCollapseTimer = setTimeout(() => {
-      if (isLive) enterBubbleMode();
-    }, 600);
-  });
-
-  overlay.addEventListener("mouseenter", () => {
-    clearTimeout(bubbleCollapseTimer);
-  });
+  // ── Bubble Mode: click to expand, click again to collapse, drag to move ──
 
   (function () {
     let dragging = false, moved = false, sx, sy, sl, st;
@@ -1052,7 +1482,7 @@
     function moveResize(cx, cy) {
       if (!resizing) return;
       const nw = Math.max(300, sw - (cx - sx));
-      const nh = Math.max(220, sh - (cy - sy));
+      const nh = Math.max(380, sh - (cy - sy));
       overlay.style.width = `${nw}px`; overlay.style.height = `${nh}px`;
       overlay.style.left = `${sl + (sw - nw)}px`; overlay.style.top = `${st + (sh - nh)}px`;
       overlay.style.right = "auto"; overlay.style.bottom = "auto";
@@ -1066,6 +1496,41 @@
     handle.addEventListener("touchstart", (e) => { const t = e.touches[0]; startResize(t.clientX, t.clientY, e); }, { passive: false });
     document.addEventListener("touchmove", (e) => { if (!resizing) return; const t = e.touches[0]; moveResize(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
     document.addEventListener("touchend", endResize);
+  })();
+
+  // ── Auto-detect: localStorage openclaw.device.auth.v1 → host or viewer ──
+
+  (async function autoDetect() {
+    const base = getSignalBase();
+
+    var broadcasting = false;
+    try {
+      var stRes = await fetch(base + "/live/api/state");
+      var stData = await stRes.json();
+      broadcasting = stData.broadcasting === true;
+    } catch (e) {}
+
+    if (broadcasting) {
+      modeSelect.style.display = "none";
+      viewerWaiting.style.display = "flex";
+      connectSignal("viewer");
+      return;
+    }
+
+    var isHost = !!localStorage.getItem("openclaw.device.auth.v1");
+    console.log("[oc-live] isHost:", isHost, "(openclaw.device.auth.v1", isHost ? "found" : "missing", ")");
+
+    if (isHost) {
+      $("oc-mode-label").textContent = "选择模式";
+      $("oc-host-actions").style.display = "flex";
+      $("oc-mode-divider").style.display = "block";
+      $("oc-btn-viewer").style.display = "flex";
+      $("oc-btn-settings").style.display = "flex";
+    } else {
+      modeSelect.style.display = "none";
+      viewerWaiting.style.display = "flex";
+      connectSignal("viewer");
+    }
   })();
 
 })();

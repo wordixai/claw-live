@@ -94,6 +94,17 @@ export default function register(api: any) {
         handler: apiHandler,
       });
     }
+
+    // Auth-check route: confirms plugin is loaded and running.
+    // The actual host/viewer distinction is determined client-side
+    // via WebSocket auth state (__ocWsOk) and DOM heuristics.
+    api.registerHttpRoute({
+      path: "/live/api/auth-check",
+      auth: "plugin",
+      match: "exact",
+      handler: apiHandler,
+    });
+
     api.logger?.info?.("[live-stream] HTTP routes registered via registerHttpRoute");
   } else if (api.registerRoute) {
     api.registerRoute({ path: "/live/*", handler: apiHandler });

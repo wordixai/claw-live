@@ -83,10 +83,11 @@ fi
 
 # ── Check if already injected ──
 
-if grep -q "oc-live-overlay" "$INDEX_HTML" 2>/dev/null; then
-  echo "⚠️  Already injected. Skipping."
-  echo "   To re-inject, remove the existing script tag first."
-  exit 0
+if grep -q "live-stream-overlay" "$INDEX_HTML" 2>/dev/null; then
+  echo "⚠️  Already injected. Re-injecting (updating files)..."
+  # Remove old tags so we can re-inject cleanly
+  sed -i.bak '/__ocWsOk/d; /live-stream-overlay/d' "$INDEX_HTML"
+  rm -f "${INDEX_HTML}.bak"
 fi
 
 # ── Copy overlay files to Control UI static dir ──
@@ -96,22 +97,41 @@ cp "$OVERLAY_JS" "${CONTROL_UI_DIR}/live-stream-overlay.js"
 cp "$OVERLAY_CSS" "${CONTROL_UI_DIR}/live-stream-overlay.css"
 cp "$OVERLAY_SW" "${CONTROL_UI_DIR}/sw.js"
 
-# ── Inject script tag before </body> ──
+# ── WebSocket auth interceptor (must load BEFORE the Control UI module script) ──
+# Gateway auth is message-level: WS opens for everyone, then server sends
+# connect.challenge, client sends connect, server replies {type:"res",ok:true/false}.
+# We intercept the first non-live WS and listen for the auth success message.
+WS_HOOK='<script>(function(){var W=WebSocket,d=false;window.__ocWsOk=false;window.WebSocket=function(u,p){var s=p!==void 0?new W(u,p):new W(u);if(!d&&u&&String(u).indexOf("/live/")<0){d=true;s.addEventListener("message",function h(e){try{var m=JSON.parse(e.data);if(m.type==="res"&&m.ok===true){window.__ocWsOk=true;s.removeEventListener("message",h)}}catch(x){}})}return s};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED})()</script>'
+
+OVERLAY_TAG='<script src="./live-stream-overlay.js" defer></script>'
 
 echo "💉 Injecting into index.html..."
 
-if grep -q "</body>" "$INDEX_HTML"; then
-  # Insert before </body>
-  sed -i.bak 's|</body>|<script src="./live-stream-overlay.js" defer></script>\n</body>|' "$INDEX_HTML"
-  rm -f "${INDEX_HTML}.bak"
-elif grep -q "</html>" "$INDEX_HTML"; then
-  # Fallback: insert before </html>
-  sed -i.bak 's|</html>|<script src="./live-stream-overlay.js" defer></script>\n</html>|' "$INDEX_HTML"
-  rm -f "${INDEX_HTML}.bak"
-else
-  # Last resort: append
-  echo '<script src="./live-stream-overlay.js" defer></script>' >> "$INDEX_HTML"
-fi
+# Use Node.js for injection to avoid sed special-character issues (& on macOS)
+node -e "
+const fs = require('fs');
+let html = fs.readFileSync(process.argv[1], 'utf-8');
+const wsHook = process.argv[2];
+const overlayTag = process.argv[3];
+
+// 1) Insert WS hook before the first <script type=\"module\">
+if (html.includes('<script type=\"module\"')) {
+  html = html.replace('<script type=\"module\"', wsHook + '\n<script type=\"module\"');
+} else {
+  html = html.replace('<head>', '<head>\n' + wsHook);
+}
+
+// 2) Insert overlay script before </body>
+if (html.includes('</body>')) {
+  html = html.replace('</body>', overlayTag + '\n</body>');
+} else if (html.includes('</html>')) {
+  html = html.replace('</html>', overlayTag + '\n</html>');
+} else {
+  html += '\n' + overlayTag;
+}
+
+fs.writeFileSync(process.argv[1], html);
+" "$INDEX_HTML" "$WS_HOOK" "$OVERLAY_TAG"
 
 echo ""
 echo "✅ Live stream overlay injected!"

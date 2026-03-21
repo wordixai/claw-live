@@ -3,6 +3,7 @@ import { SignalingService } from "./signaling-service.js";
 import { StreamControlRequest } from "./types.js";
 import * as fs from "fs";
 import * as path from "path";
+import { exec } from "child_process";
 
 export function createApiHandler(stream: StreamService, signaling: SignalingService) {
   const overlayDir = path.resolve(__dirname, "..", "overlay");
@@ -52,9 +53,16 @@ export function createApiHandler(stream: StreamService, signaling: SignalingServ
       return handleControl(req, res, stream);
     }
 
+    // --- Auth check: execute `openclaw health` to verify device authorization ---
+    if (pathname === "/live/api/auth-check") {
+      const port = String(req.socket?.localPort || process.env.PORT || "3000");
+      const result = await checkGatewayHealth(port);
+      return json(res, result);
+    }
+
     // --- Stream state (GET) ---
     if (pathname === "/live/api/state") {
-      return json(res, { ok: true, state: stream.getState() });
+      return json(res, { ok: true, state: stream.getState(), broadcasting: signaling.hasBroadcaster() });
     }
 
     // --- Danmaku history ---
@@ -148,6 +156,44 @@ function serveFile(res: any, filePath: string, contentType: string) {
     res.writeHead(404);
     res.end("File not found");
   }
+}
+
+// ── Gateway health check via `openclaw health` ──
+
+let healthCache: { result: any; ts: number } | null = null;
+const HEALTH_CACHE_TTL = 60_000;
+
+function checkGatewayHealth(port: string): Promise<{ ok: boolean; isHost: boolean; gateway?: any }> {
+  if (healthCache && Date.now() - healthCache.ts < HEALTH_CACHE_TTL) {
+    return Promise.resolve(healthCache.result);
+  }
+
+  return new Promise((resolve) => {
+    const env = { ...process.env, OPENCLAW_GATEWAY_PORT: port };
+    exec("openclaw health --json --timeout 3000", { timeout: 6000, env }, (err, stdout) => {
+      if (err) {
+        const fail = { ok: false, isHost: false, error: err.message };
+        resolve(fail);
+        return;
+      }
+      try {
+        const health = JSON.parse(stdout);
+        const result = {
+          ok: true,
+          isHost: health.ok === true,
+          gateway: {
+            healthy: health.ok,
+            channels: Object.keys(health.channels || {}),
+            agents: (health.agents || []).map((a: any) => a.agentId),
+          },
+        };
+        healthCache = { result, ts: Date.now() };
+        resolve(result);
+      } catch {
+        resolve({ ok: false, isHost: false });
+      }
+    });
+  });
 }
 
 function json(res: any, data: any, status = 200) {

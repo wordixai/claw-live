@@ -129,6 +129,22 @@ export class SignalingService {
     if (msg.type === "danmaku" && msg.text) {
       this.broadcastToAll({ type: "danmaku", text: msg.text, sender: msg.sender || "主播", color: msg.color });
     }
+    // Cohost: broadcaster → specific viewer
+    if (msg.type === "mic-accept" && msg.viewerId) {
+      this.sendTo(this.viewers.get(msg.viewerId as string), { type: "mic-accept" });
+    }
+    if (msg.type === "mic-reject" && msg.viewerId) {
+      this.sendTo(this.viewers.get(msg.viewerId as string), { type: "mic-reject" });
+    }
+    if (msg.type === "mic-answer" && msg.viewerId) {
+      this.sendTo(this.viewers.get(msg.viewerId as string), { type: "mic-answer", sdp: msg.sdp });
+    }
+    if (msg.type === "mic-ice" && msg.viewerId) {
+      this.sendTo(this.viewers.get(msg.viewerId as string), { type: "mic-ice", candidate: msg.candidate });
+    }
+    if (msg.type === "mic-stop" && msg.viewerId) {
+      this.sendTo(this.viewers.get(msg.viewerId as string), { type: "mic-stop" });
+    }
   }
 
   private handleViewerMessage(viewerId: string, msg: Record<string, unknown>) {
@@ -141,6 +157,23 @@ export class SignalingService {
     if (msg.type === "danmaku" && msg.text) {
       this.broadcastToAll({ type: "danmaku", text: msg.text, sender: msg.sender || viewerId, color: msg.color });
     }
+    // Cohost: viewer → broadcaster
+    if (msg.type === "mic-request") {
+      this.sendTo(this.broadcaster, { type: "mic-request", viewerId });
+    }
+    if (msg.type === "mic-offer") {
+      this.sendTo(this.broadcaster, { type: "mic-offer", viewerId, sdp: msg.sdp });
+    }
+    if (msg.type === "mic-ice") {
+      this.sendTo(this.broadcaster, { type: "mic-ice", viewerId, candidate: msg.candidate });
+    }
+    if (msg.type === "mic-stop") {
+      this.sendTo(this.broadcaster, { type: "mic-stop", viewerId });
+    }
+  }
+
+  hasBroadcaster(): boolean {
+    return this.broadcaster !== null;
   }
 
   destroy() {
