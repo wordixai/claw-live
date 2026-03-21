@@ -1523,8 +1523,6 @@
     if (isHost) {
       $("oc-mode-label").textContent = "选择模式";
       $("oc-host-actions").style.display = "flex";
-      $("oc-mode-divider").style.display = "block";
-      $("oc-btn-viewer").style.display = "flex";
       $("oc-btn-settings").style.display = "flex";
     } else {
       modeSelect.style.display = "none";
