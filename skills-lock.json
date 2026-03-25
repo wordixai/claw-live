@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "skills": {
+    "company-values": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "0223f48acc39f82066414e36881d3ec36e2cb0e1dde2d8c7aaa34516f003eab8"
+    },
+    "find-community": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "f27dc6b34d2bd6a73dd837bb0d764d28ff2eeae7aee7ce2569ec16c3d2ee8a40"
+    },
+    "first-customers": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "7db285b341170d96270a32857742e3740f6e183ee54ab9c868dbfde95a1df9a7"
+    },
+    "grow-sustainably": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "a579e4ba6b287c3769252bfb1bb2a319185599c6d424c260c8518ccefd782054"
+    },
+    "marketing-plan": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "817943ab2ccccb10b9143a39a997a14068df187dcaf2f4ff6f3d8299863ce08d"
+    },
+    "minimalist-review": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "2c8032785b61ef3490722acdaab2f0c6bed46bc7926a2204cdf7f9b6b2d0e1e1"
+    },
+    "mvp": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "09dc96e5b62885f6102b2319c1ed6b8815005e81467fa42afb6102fafdfa9e0b"
+    },
+    "pricing": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "d342b6affca02dfd73adc335db4e0472c7727cad0530ebf882534b15b3f7b672"
+    },
+    "validate-idea": {
+      "source": "slavingia/skills",
+      "sourceType": "github",
+      "computedHash": "6c35390ae0793d0a46285c0e2c2f9cce651f71cc7a4e845467f7f07a147cc052"
+    }
+  }
+}
