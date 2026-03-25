@@ -69,8 +69,9 @@ export class SignalingService {
 
     this.sendTo(this.broadcaster, { type: "role", role: "broadcaster", clientId, viewerCount: this.viewers.size });
 
-    for (const vClient of this.viewers.values()) {
+    for (const [viewerId, vClient] of this.viewers.entries()) {
       this.sendTo(vClient, { type: "broadcaster-ready" });
+      this.sendTo(this.broadcaster, { type: "viewer-joined", viewerId });
     }
 
     res.on("close", () => {

@@ -50,3 +50,12 @@ export const DEFAULT_STREAM_STATE: StreamState = {
   danmakuCount: 0,
   errorMessage: null,
 };
+
+export interface AssistSession {
+  sessionId: string;
+  code: string;
+  status: "waiting" | "connected" | "ended";
+  createdAt: number;
+  hostClientId: string | null;
+  assistantClientId: string | null;
+}

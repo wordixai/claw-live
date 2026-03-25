@@ -81,6 +81,38 @@ export function createApiHandler(stream: StreamService, signaling: SignalingServ
       return handleSSE(req, res, stream);
     }
 
+    // --- Assist session: create ---
+    if (pathname === "/live/api/assist/create" && req.method === "POST") {
+      const session = stream.createAssistSession();
+      const host = req.headers.host || "localhost";
+      const proto = req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http");
+      const joinUrl = `${proto}://${host}?assist=${session.code}`;
+      return json(res, { ok: true, session, joinUrl });
+    }
+
+    // --- Assist session: join by code ---
+    if (pathname === "/live/api/assist/join" && req.method === "POST") {
+      const body = await readBody(req);
+      const { code } = body as { code: string };
+      if (!code) return json(res, { ok: false, message: "code is required" }, 400);
+      const session = stream.joinAssistSession(code.toUpperCase());
+      if (!session) return json(res, { ok: false, message: "Invalid or expired session code" }, 404);
+      return json(res, { ok: true, session });
+    }
+
+    // --- Assist session: end ---
+    if (pathname === "/live/api/assist/end" && req.method === "POST") {
+      const session = stream.endAssistSession();
+      if (!session) return json(res, { ok: false, message: "No active assist session" }, 404);
+      return json(res, { ok: true, session });
+    }
+
+    // --- Assist session: current state ---
+    if (pathname === "/live/api/assist/state") {
+      const session = stream.getAssistSession();
+      return json(res, { ok: true, session });
+    }
+
     res.writeHead(404);
     res.end("Not Found");
   };

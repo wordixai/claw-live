@@ -2,6 +2,7 @@ import {
   StreamState,
   StreamConfig,
   DanmakuMessage,
+  AssistSession,
   DEFAULT_STREAM_STATE,
 } from "./types.js";
 
@@ -15,6 +16,7 @@ export class StreamService {
   private danmakuHistory: DanmakuMessage[] = [];
   private viewerTimer: ReturnType<typeof setInterval> | null = null;
   private msgCounter = 0;
+  private assistSession: AssistSession | null = null;
 
   getState(): StreamState {
     return { ...this.state };
@@ -89,10 +91,54 @@ export class StreamService {
     return () => this.danmakuListeners.delete(fn);
   }
 
+  // ── Assist Session ──
+
+  createAssistSession(): AssistSession {
+    const code = this.generateSessionCode();
+    this.assistSession = {
+      sessionId: `assist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      code,
+      status: "waiting",
+      createdAt: Date.now(),
+      hostClientId: null,
+      assistantClientId: null,
+    };
+    return { ...this.assistSession };
+  }
+
+  joinAssistSession(code: string): AssistSession | null {
+    if (!this.assistSession || this.assistSession.code !== code) return null;
+    if (this.assistSession.status === "ended") return null;
+    this.assistSession.status = "connected";
+    return { ...this.assistSession };
+  }
+
+  endAssistSession(): AssistSession | null {
+    if (!this.assistSession) return null;
+    this.assistSession.status = "ended";
+    const ended = { ...this.assistSession };
+    this.assistSession = null;
+    return ended;
+  }
+
+  getAssistSession(): AssistSession | null {
+    return this.assistSession ? { ...this.assistSession } : null;
+  }
+
+  private generateSessionCode(): string {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return code;
+  }
+
   destroy() {
     this.stopViewerSimulation();
     this.listeners.clear();
     this.danmakuListeners.clear();
+    this.assistSession = null;
   }
 
   private notify() {

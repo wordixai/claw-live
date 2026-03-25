@@ -49,3 +49,9 @@ souls/
 next-env.d.ts
 
 /.pnpm-store/*
+
+.agents/
+
+.cursor/
+
+.gstack/

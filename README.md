@@ -1,4 +1,4 @@
-# @openclaw/live-stream
+# openclaw-live-stream
 
 Live stream overlay plugin for OpenClaw — adds a floating video player with danmaku directly into the Control UI.
 

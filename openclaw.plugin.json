@@ -1,6 +1,6 @@
 {
   "id": "live-stream",
-  "name": "@openclaw/live-stream",
+  "name": "openclaw-live-stream",
   "version": "0.1.0",
   "description": "Live stream overlay for Control UI — floating video player with danmaku, drag/resize, and stream controls.",
   "extensions": ["./src/index.ts"],

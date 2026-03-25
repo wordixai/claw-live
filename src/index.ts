@@ -83,6 +83,10 @@ export default function register(api: any) {
     "/live/api/danmaku",
     "/live/api/danmaku/send",
     "/live/api/events",
+    "/live/api/assist/create",
+    "/live/api/assist/join",
+    "/live/api/assist/end",
+    "/live/api/assist/state",
   ];
 
   if (api.registerHttpRoute) {

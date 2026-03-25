@@ -77,6 +77,10 @@
   --oc-blue:     #1976d2;
   --oc-cyan:     #0097a7;
   --oc-green:    #2e7d32;
+  --oc-accent-live:   #e53935;
+  --oc-accent-assist: #0097a7;
+  --oc-focus-ring:    rgba(229,57,53,0.35);
+  --oc-focus-glow:    rgba(229,57,53,0.08);
   --oc-radius:   14px;
   --oc-radius-sm:8px;
   --oc-radius-pill:100px;
@@ -119,7 +123,7 @@
 @keyframes oc-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.85);}}
 
 .oc-live-title{flex:1;color:var(--oc-text);font-size:13px;font-weight:600;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.oc-live-viewers{color:var(--oc-text-3);font-size:11px;font-weight:500;white-space:nowrap;flex-shrink:0;}
+.oc-live-viewers{color:var(--oc-text-3);font-size:12px;font-weight:500;white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums;}
 .oc-live-controls{display:flex;gap:2px;flex-shrink:0;}
 .oc-live-btn{
   width:30px;height:30px;border:none;background:transparent;border-radius:var(--oc-radius-sm);
@@ -129,6 +133,7 @@
 }
 .oc-live-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
 .oc-live-btn:active{transform:scale(.9);}
+#oc-live-overlay button:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px;}
 
 /* ── Body ── */
 .oc-live-body{flex:1;position:relative;overflow:hidden;background:var(--oc-bg-alt);}
@@ -155,8 +160,9 @@
   content:"";position:absolute;inset:0;opacity:0;
   transition:opacity var(--oc-norm);border-radius:inherit;
 }
-.oc-action-card:nth-child(1)::before{background:radial-gradient(circle at 50% 30%,rgba(229,57,53,0.06),transparent 70%);}
-.oc-action-card:nth-child(2)::before{background:radial-gradient(circle at 50% 30%,rgba(25,118,210,0.06),transparent 70%);}
+.oc-action-card:nth-child(1)::before{background:radial-gradient(circle at 50% 30%,rgba(0,151,167,0.06),transparent 70%);}
+.oc-action-card:nth-child(2)::before{background:radial-gradient(circle at 50% 30%,rgba(229,57,53,0.06),transparent 70%);}
+.oc-action-card:nth-child(3)::before{background:radial-gradient(circle at 50% 30%,rgba(25,118,210,0.06),transparent 70%);}
 .oc-action-card:hover{border-color:var(--oc-border-h);transform:translateY(-2px);background:#ffffff;box-shadow:0 4px 12px rgba(0,0,0,0.06);}
 .oc-action-card:hover::before{opacity:1;}
 .oc-action-card:active{transform:translateY(0) scale(.98);}
@@ -272,7 +278,7 @@
   height:40px;border:1.5px solid transparent;border-radius:var(--oc-radius-pill);
   background:var(--oc-surface);transition:all var(--oc-fast);padding:3px;box-sizing:border-box;
 }
-.oc-dm-wrap:focus-within{background:#ffffff;border-color:rgba(147,130,220,0.4);box-shadow:0 0 0 3px rgba(147,130,220,0.08);}
+.oc-dm-wrap:focus-within{background:#ffffff;border-color:var(--oc-focus-ring);box-shadow:0 0 0 3px var(--oc-focus-glow);}
 .oc-danmaku-input{
   flex:1;height:100%;border:none;border-radius:var(--oc-radius-pill);
   background:transparent;color:var(--oc-text);font-size:13px;padding:0 var(--oc-sp-5);
@@ -289,8 +295,8 @@
 .oc-danmaku-send-btn:active{transform:scale(.97);}
 
 /* ── Resize Handle ── */
-.oc-resize-handle{position:absolute;top:4px;left:4px;width:16px;height:16px;cursor:nw-resize;z-index:10;}
-.oc-resize-handle::after{content:"";position:absolute;top:3px;left:3px;width:7px;height:7px;border-top:2px solid var(--oc-border);border-left:2px solid var(--oc-border);border-radius:1px 0 0 0;transition:border-color var(--oc-fast);}
+.oc-resize-handle{position:absolute;top:2px;left:2px;width:22px;height:22px;cursor:nw-resize;z-index:10;}
+.oc-resize-handle::after{content:"";position:absolute;top:5px;left:5px;width:8px;height:8px;border-top:2px solid var(--oc-border);border-left:2px solid var(--oc-border);border-radius:1px 0 0 0;transition:border-color var(--oc-fast);}
 .oc-resize-handle:hover::after{border-color:var(--oc-border-h);}
 
 /* ── Toggle FAB ── */
@@ -326,6 +332,8 @@
 #oc-live-overlay.oc-bubble .oc-live-end-btn,
 #oc-live-overlay.oc-bubble .oc-settings-panel,
 #oc-live-overlay.oc-bubble .oc-live-placeholder{display:none!important;}
+#oc-live-overlay.oc-bubble #oc-assist-panel{display:none!important;}
+#oc-live-overlay.oc-bubble #oc-assist-join{display:none!important;}
 #oc-live-overlay.oc-bubble .oc-live-body{border-radius:50%;overflow:hidden;}
 #oc-live-overlay.oc-bubble .oc-live-video{object-fit:cover;}
 #oc-live-overlay.oc-bubble::after{
@@ -462,6 +470,127 @@
 .oc-settings-save:hover{opacity:.88;transform:translateY(-1px);}
 .oc-settings-cancel{background:var(--oc-surface);color:var(--oc-text-2);border-color:var(--oc-border);}
 .oc-settings-cancel:hover{background:var(--oc-border);color:var(--oc-text);}
+
+/* ── Assist Mode ── */
+.oc-action-card.oc-assist-card{border-color:rgba(0,151,167,0.25);}
+.oc-action-card.oc-assist-card::before{background:radial-gradient(circle at 50% 30%,rgba(0,151,167,0.06),transparent 70%);}
+.oc-action-icon.oc-cyan{background:rgba(0,151,167,0.08);color:#0097a7;}
+
+#oc-assist-panel{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-start;gap:0;
+  background:var(--oc-bg-alt);z-index:3;padding:var(--oc-sp-4) var(--oc-sp-5);
+  overflow-y:auto;
+  animation:oc-settings-in var(--oc-norm) both;
+}
+.oc-assist-status{
+  display:flex;align-items:center;gap:var(--oc-sp-2);
+  font-size:12px;font-weight:600;color:var(--oc-text-2);
+  margin-bottom:var(--oc-sp-3);
+}
+.oc-assist-status-dot{
+  width:8px;height:8px;border-radius:50%;flex-shrink:0;
+}
+.oc-assist-status-dot.oc-waiting{background:#f59e0b;animation:oc-pulse 2s ease-in-out infinite;}
+.oc-assist-status-dot.oc-connected{background:var(--oc-green);box-shadow:0 0 6px rgba(46,125,50,0.4);}
+
+.oc-assist-code-box{
+  display:flex;flex-direction:column;align-items:center;gap:var(--oc-sp-2);
+  padding:var(--oc-sp-4);border-radius:var(--oc-radius);
+  background:#fff;border:1px solid var(--oc-border);width:100%;
+  margin-bottom:var(--oc-sp-3);
+}
+.oc-assist-code-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--oc-text-3);}
+.oc-assist-code{
+  font-size:24px;font-weight:800;letter-spacing:5px;color:var(--oc-text);
+  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;
+  user-select:all;
+}
+.oc-assist-link-row{
+  display:flex;align-items:center;gap:var(--oc-sp-2);width:100%;
+}
+.oc-assist-link-input{
+  flex:1;height:30px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:var(--oc-surface);color:var(--oc-text-2);font-size:11px;
+  padding:0 var(--oc-sp-3);outline:none;font-family:var(--oc-font);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.oc-assist-copy-btn{
+  height:30px;padding:0 10px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:#fff;color:var(--oc-text-2);font-size:11px;font-weight:600;
+  cursor:pointer;transition:all var(--oc-fast);white-space:nowrap;font-family:var(--oc-font);
+}
+.oc-assist-copy-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
+.oc-assist-copy-btn:active{transform:scale(.96);}
+.oc-assist-copy-btn.oc-copied{background:rgba(46,125,50,0.08);color:var(--oc-green);border-color:rgba(46,125,50,0.3);}
+
+.oc-assist-hint{font-size:11px;color:var(--oc-text-3);text-align:center;line-height:1.4;margin-bottom:var(--oc-sp-3);}
+
+.oc-assist-share-btn{
+  width:100%;height:38px;border:none;border-radius:var(--oc-radius-sm);
+  background:linear-gradient(135deg,#0097a7,#00838f);color:#fff;
+  font-size:13px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
+  margin-bottom:var(--oc-sp-3);flex-shrink:0;
+}
+.oc-assist-share-btn:hover{opacity:.88;transform:translateY(-1px);}
+.oc-assist-share-btn:active{transform:translateY(0) scale(.98);}
+
+.oc-assist-end-btn{
+  height:30px;padding:0 16px;border:1px solid rgba(229,57,53,0.2);border-radius:var(--oc-radius-pill);
+  background:rgba(229,57,53,0.06);color:var(--oc-accent);
+  font-size:11px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
+  flex-shrink:0;
+}
+.oc-assist-end-btn:hover{background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.35);}
+
+#oc-assist-badge{
+  position:absolute;top:var(--oc-sp-3);left:var(--oc-sp-3);z-index:4;
+  padding:4px 10px;border-radius:var(--oc-radius-pill);
+  background:rgba(0,151,167,0.9);color:#fff;
+  font-size:11px;font-weight:600;display:none;align-items:center;gap:5px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.08);
+  animation:oc-badge-in var(--oc-norm) both;
+}
+#oc-assist-badge .oc-assist-badge-dot{
+  width:6px;height:6px;border-radius:50%;background:#fff;animation:oc-pulse 2s ease-in-out infinite;
+}
+
+/* ── Assist join page (for assistant entering via code) ── */
+#oc-assist-join{
+  position:absolute;inset:0;display:none;flex-direction:column;
+  align-items:center;justify-content:center;gap:var(--oc-sp-4);
+  background:var(--oc-bg-alt);z-index:3;padding:var(--oc-sp-6);
+}
+.oc-assist-join-title{font-size:14px;font-weight:700;color:var(--oc-text);}
+.oc-assist-join-input{
+  width:180px;height:44px;border:2px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:#fff;color:var(--oc-text);font-size:22px;font-weight:700;
+  letter-spacing:4px;text-align:center;text-transform:uppercase;
+  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;
+  outline:none;transition:border-color var(--oc-fast);
+}
+.oc-assist-join-input:focus{border-color:var(--oc-accent-assist);}
+.oc-assist-join-btn{
+  width:180px;height:40px;border:none;border-radius:var(--oc-radius-sm);
+  background:linear-gradient(135deg,#0097a7,#00838f);color:#fff;
+  font-size:13px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
+}
+.oc-assist-join-btn:hover{opacity:.88;}
+.oc-assist-join-error{font-size:11px;color:var(--oc-accent);display:none;}
+
+/* Reduced motion: keep state cues without looping animations */
+@media (prefers-reduced-motion: reduce){
+  #oc-live-overlay{animation:none;}
+  .oc-live-dot.oc-live-on{animation:none!important;}
+  .oc-viewer-dot{animation:none!important;}
+  .oc-spinner{animation:none!important;border-top-color:var(--oc-accent);}
+  #oc-live-toggle.oc-visible{animation:none;}
+  .oc-live-source-badge.oc-visible{animation:none;}
+  .oc-live-badge-dot{animation:none!important;}
+  #oc-live-overlay.oc-bubble::after{animation:none!important;}
+  .oc-cohost-badge .oc-cohost-dot{animation:none!important;}
+  .oc-settings-panel,.oc-mic-request-popup{animation:none!important;}
+}
 `;
   document.head.appendChild(style);
 
@@ -489,13 +618,17 @@
         <div id="oc-mode-select">
           <span class="oc-mode-label" id="oc-mode-label">直播间</span>
           <div class="oc-mode-actions" id="oc-host-actions" style="display:none;">
+            <div class="oc-action-card oc-assist-card" id="oc-btn-assist">
+              <div class="oc-action-icon oc-cyan"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+              <span class="oc-action-name">远程协助</span>
+            </div>
             <div class="oc-action-card" id="oc-btn-camera">
               <div class="oc-action-icon oc-red"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></div>
-              <span class="oc-action-name">开播</span>
+              <span class="oc-action-name">视频直播</span>
             </div>
             <div class="oc-action-card" id="oc-btn-screen">
               <div class="oc-action-icon oc-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg></div>
-              <span class="oc-action-name">共享屏幕</span>
+              <span class="oc-action-name">屏幕直播</span>
             </div>
           </div>
           <div class="oc-mode-divider" id="oc-mode-divider" style="display:none;"></div>
@@ -516,6 +649,30 @@
       <button id="oc-audio-unlock" title="点击开启音频"></button>
       <button id="oc-mic-btn" title="连麦"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg><span>连麦</span></button>
       <div class="oc-cohost-badge" id="oc-cohost-badge"><span class="oc-cohost-dot"></span>连麦中</div>
+      <div id="oc-assist-badge"><span class="oc-assist-badge-dot"></span><span id="oc-assist-badge-text">协助中</span></div>
+      <div id="oc-assist-panel" style="display:none;">
+        <div class="oc-assist-status" id="oc-assist-status">
+          <span class="oc-assist-status-dot oc-waiting" id="oc-assist-status-dot"></span>
+          <span id="oc-assist-status-text">等待协助者加入</span>
+        </div>
+        <div class="oc-assist-code-box">
+          <span class="oc-assist-code-label">会话码</span>
+          <span class="oc-assist-code" id="oc-assist-code">------</span>
+          <div class="oc-assist-link-row">
+            <input class="oc-assist-link-input" id="oc-assist-link" readonly />
+            <button class="oc-assist-copy-btn" id="oc-assist-copy">复制链接</button>
+          </div>
+        </div>
+        <span class="oc-assist-hint">把会话码或链接发给协助者<br/>对方打开后即可加入</span>
+        <button class="oc-assist-share-btn" id="oc-assist-share-screen">共享屏幕给协助者</button>
+        <button class="oc-assist-end-btn" id="oc-assist-end">结束会话</button>
+      </div>
+      <div id="oc-assist-join" style="display:none;">
+        <span class="oc-assist-join-title">加入协助会话</span>
+        <input class="oc-assist-join-input" id="oc-assist-join-code" maxlength="6" placeholder="输入会话码" />
+        <button class="oc-assist-join-btn" id="oc-assist-join-btn">加入</button>
+        <span class="oc-assist-join-error" id="oc-assist-join-error">会话码无效或已过期</span>
+      </div>
       <div class="oc-settings-panel" id="oc-settings" style="display:none;">
         <div class="oc-settings-title">⚙ 连接设置</div>
         <label class="oc-settings-label">信令服务器地址
@@ -606,6 +763,20 @@
   const chatEmpty = $("oc-chat-empty");
   const micBtn = $("oc-mic-btn");
   const cohostBadge = $("oc-cohost-badge");
+  const assistPanel = $("oc-assist-panel");
+  const assistCode = $("oc-assist-code");
+  const assistLink = $("oc-assist-link");
+  const assistCopyBtn = $("oc-assist-copy");
+  const assistStatusDot = $("oc-assist-status-dot");
+  const assistStatusText = $("oc-assist-status-text");
+  const assistBadge = $("oc-assist-badge");
+  const assistBadgeText = $("oc-assist-badge-text");
+  const assistJoinPanel = $("oc-assist-join");
+  const assistJoinCodeInput = $("oc-assist-join-code");
+  const assistJoinError = $("oc-assist-join-error");
+
+  let assistSessionData = null;
+  let isAssistMode = false;
 
   // ── Initialize UI state ──
   video.style.display = "none";
@@ -798,7 +969,11 @@
         micBtn.style.display = "none";
         exitBubbleMode();
         updateUI(null);
-        viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播已离开，等待重新开播</span>';
+        if (isAssistMode) {
+          viewerWaiting.innerHTML = '<span style="color:var(--oc-text-2);font-size:13px;font-weight:600;">协助会话已结束</span><span style="color:var(--oc-text-3);font-size:11px;">对方已结束屏幕共享</span>';
+        } else {
+          viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播已离开，等待重新开播</span>';
+        }
         viewerWaiting.style.display = "flex";
         placeholder.style.display = "flex";
         video.style.display = "none";
@@ -903,9 +1078,19 @@
       startedAt = startedAt || Date.now();
       placeholder.style.display = "none";
       video.style.display = "block";
-      updateUI("📡 观看中");
+      if (isAssistMode) {
+        updateUI("🛠 协助中");
+        assistBadge.style.display = "flex";
+        assistBadgeText.textContent = "协助中";
+        micBtn.style.display = "none";
+        video.muted = false;
+        video.play().catch(() => {});
+        setTimeout(() => sendSignal({ type: "mic-request" }), 1500);
+      } else {
+        updateUI("📡 观看中");
+        micBtn.style.display = "flex";
+      }
       audioUnlockBtn.style.display = "flex";
-      micBtn.style.display = "flex";
       syncAudioBtn();
       setTimeout(() => enterBubbleMode(), 500);
     };
@@ -959,7 +1144,7 @@
         audio: true,
       });
       localStream.getVideoTracks()[0].addEventListener("ended", () => stopLive());
-      goLive("🖥 屏幕共享");
+      goLive("🖥 屏幕直播");
     } catch (err) {
       if (err.name !== "AbortError" && err.name !== "NotAllowedError") {
         alert("屏幕共享失败: " + err.message);
@@ -999,8 +1184,14 @@
     role = null;
     audioUnlockBtn.style.display = "none";
     micBtn.style.display = "none";
+    assistPanel.style.display = "none";
+    assistBadge.style.display = "none";
+    assistJoinPanel.style.display = "none";
     if (durationTimer) clearInterval(durationTimer);
     statRole.textContent = "";
+    stopBtn.textContent = "关播";
+    isAssistMode = false;
+    assistSessionData = null;
     updateUI(null);
     modeSelect.style.display = "block";
     viewerWaiting.style.display = "none";
@@ -1019,15 +1210,26 @@
 
   function updateUI(sourceLabel) {
     dot.className = "oc-live-dot" + (isLive ? " oc-live-on" : "");
+    if (isAssistMode && isLive) {
+      dot.style.background = "var(--oc-accent-assist)";
+      dot.style.boxShadow = "0 0 8px var(--oc-accent-assist)";
+    } else if (!isLive) {
+      dot.style.background = "";
+      dot.style.boxShadow = "";
+    }
     viewersEl.textContent = "";
     placeholder.style.display = isLive ? "none" : "flex";
     video.style.display = isLive ? "block" : "none";
     stopBtn.style.display = (isLive && role === "broadcaster") ? "block" : "none";
     if (isLive && role === "broadcaster") {
-      endBtn.textContent = "结束直播";
+      endBtn.textContent = isAssistMode ? "结束会话" : "结束直播";
       endBtn.style.display = "block";
+      if (isAssistMode) {
+        stopBtn.textContent = "结束会话";
+        assistBadge.style.display = "flex";
+      }
     } else if (isLive && role === "viewer") {
-      endBtn.textContent = "停止观看";
+      endBtn.textContent = isAssistMode ? "离开会话" : "停止观看";
       endBtn.style.display = "block";
     } else {
       endBtn.style.display = "none";
@@ -1035,8 +1237,10 @@
     bubbleBtn.style.display = isLive ? "flex" : "none";
 
     if (sourceLabel) {
-      updateViewerBadge();
-      sourceBadge.classList.add("oc-visible");
+      if (!isAssistMode) {
+        updateViewerBadge();
+        sourceBadge.classList.add("oc-visible");
+      }
     } else {
       sourceBadge.classList.remove("oc-visible");
     }
@@ -1144,9 +1348,13 @@
     try {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (err) {
-      micBtn.classList.remove("oc-mic-pending", "oc-mic-active");
-      micBtn.querySelector("span").textContent = "连麦";
-      alert("无法访问麦克风: " + err.message);
+      if (!isAssistMode) {
+        micBtn.classList.remove("oc-mic-pending", "oc-mic-active");
+        micBtn.querySelector("span").textContent = "连麦";
+        alert("无法访问麦克风: " + err.message);
+      } else {
+        console.warn("[oc-live] Assist: could not get assistant mic:", err.message);
+      }
       sendSignal({ type: "mic-stop" });
       return;
     }
@@ -1168,9 +1376,13 @@
     sendSignal({ type: "mic-offer", sdp: offer.sdp });
 
     isCohostActive = true;
-    micBtn.classList.add("oc-mic-active");
-    micBtn.querySelector("span").textContent = "结束连麦";
-    cohostBadge.style.display = "flex";
+    if (isAssistMode) {
+      appendChatMessage("系统", "语音已连接", "#0097a7");
+    } else {
+      micBtn.classList.add("oc-mic-active");
+      micBtn.querySelector("span").textContent = "结束连麦";
+      cohostBadge.style.display = "flex";
+    }
   }
 
   // ── Viewer: broadcaster rejected ──
@@ -1193,6 +1405,13 @@
 
     if (isCohostActive) {
       sendSignal({ type: "mic-reject", viewerId });
+      return;
+    }
+
+    if (isAssistMode) {
+      cohostViewerId = viewerId;
+      sendSignal({ type: "mic-accept", viewerId: viewerId });
+      isCohostActive = true;
       return;
     }
 
@@ -1292,7 +1511,158 @@
     if (popup) popup.remove();
   }
 
+  // ══════════════════════════════════
+  //  Assist Session Logic
+  // ══════════════════════════════════
+
+  async function startAssistSession() {
+    const base = getSignalBase();
+    try {
+      const res = await fetch(`${base}/live/api/assist/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const data = await res.json();
+      if (!data.ok) { alert("创建协助会话失败"); return; }
+      assistSessionData = data.session;
+      isAssistMode = true;
+
+      modeSelect.style.display = "none";
+      assistPanel.style.display = "flex";
+      assistCode.textContent = data.session.code;
+      assistLink.value = data.joinUrl;
+
+      titleEl.textContent = "远程协助";
+      dot.className = "oc-live-dot oc-live-on";
+      dot.style.background = "var(--oc-accent-assist)";
+      dot.style.boxShadow = "0 0 8px var(--oc-accent-assist)";
+    } catch (err) {
+      alert("创建协助会话失败: " + err.message);
+    }
+  }
+
+  function copyAssistLink() {
+    const link = assistLink.value;
+    if (!link) return;
+    navigator.clipboard.writeText(link).then(() => {
+      assistCopyBtn.textContent = "已复制";
+      assistCopyBtn.classList.add("oc-copied");
+      setTimeout(() => { assistCopyBtn.textContent = "复制链接"; assistCopyBtn.classList.remove("oc-copied"); }, 2000);
+    }).catch(() => {
+      assistLink.select();
+      document.execCommand("copy");
+      assistCopyBtn.textContent = "已复制";
+      assistCopyBtn.classList.add("oc-copied");
+      setTimeout(() => { assistCopyBtn.textContent = "复制链接"; assistCopyBtn.classList.remove("oc-copied"); }, 2000);
+    });
+  }
+
+  async function startAssistScreenShare() {
+    if (!checkSecureContext()) return;
+    try {
+      localStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "always" }, audio: true });
+      localStream.getVideoTracks()[0].addEventListener("ended", () => endAssistSession());
+
+      try {
+        var hostMic = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        hostMic.getAudioTracks().forEach(function (t) { localStream.addTrack(t); });
+      } catch (micErr) {
+        console.warn("[oc-live] Assist: could not get host mic, continuing without voice:", micErr.message);
+      }
+
+      video.srcObject = localStream;
+      video.play().catch(() => {});
+      isLive = true;
+      role = "broadcaster";
+      startedAt = Date.now();
+      statRole.textContent = "🛠 协助中";
+      connectSignal("broadcaster");
+
+      assistPanel.style.display = "none";
+      placeholder.style.display = "none";
+      video.style.display = "block";
+      endBtn.textContent = "结束会话";
+      endBtn.style.display = "block";
+      stopBtn.style.display = "block";
+      stopBtn.textContent = "结束会话";
+      assistBadge.style.display = "flex";
+      assistBadgeText.textContent = assistSessionData?.code || "协助中";
+      bubbleBtn.style.display = "flex";
+      startDurationTimer();
+    } catch (err) {
+      if (err.name !== "AbortError" && err.name !== "NotAllowedError") {
+        alert("屏幕共享失败: " + err.message);
+      }
+    }
+  }
+
+  async function endAssistSession() {
+    const base = getSignalBase();
+    try { await fetch(`${base}/live/api/assist/end`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch {}
+    assistSessionData = null;
+    isAssistMode = false;
+    assistPanel.style.display = "none";
+    assistBadge.style.display = "none";
+    dot.style.background = "";
+    dot.style.boxShadow = "";
+    stopBtn.textContent = "关播";
+    stopLive();
+  }
+
+  async function joinAssistByCode(code) {
+    const base = getSignalBase();
+    try {
+      const res = await fetch(`${base}/live/api/assist/join`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code.toUpperCase() }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        assistJoinError.style.display = "block";
+        return;
+      }
+      assistJoinError.style.display = "none";
+      assistJoinPanel.style.display = "none";
+      isAssistMode = true;
+      assistSessionData = data.session;
+
+      titleEl.textContent = "远程协助";
+      modeSelect.style.display = "none";
+      viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2);font-size:12px;font-weight:500;">正在连接协助者画面</span>';
+      viewerWaiting.style.display = "flex";
+      connectSignal("viewer");
+    } catch (err) {
+      assistJoinError.textContent = "连接失败: " + err.message;
+      assistJoinError.style.display = "block";
+    }
+  }
+
+  function checkAssistCodeInUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("assist");
+    if (code && code.length >= 4) {
+      return code.toUpperCase();
+    }
+    return null;
+  }
+
   // ── Event Listeners ──
+
+  $("oc-btn-assist").addEventListener("click", startAssistSession);
+  $("oc-assist-copy").addEventListener("click", copyAssistLink);
+  $("oc-assist-share-screen").addEventListener("click", startAssistScreenShare);
+  $("oc-assist-end").addEventListener("click", endAssistSession);
+  $("oc-assist-join-btn").addEventListener("click", () => {
+    const code = assistJoinCodeInput.value.trim();
+    if (code.length >= 4) joinAssistByCode(code);
+  });
+  assistJoinCodeInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      const code = assistJoinCodeInput.value.trim();
+      if (code.length >= 4) joinAssistByCode(code);
+    }
+  });
+  assistJoinCodeInput.addEventListener("keyup", (e) => e.stopPropagation());
+  assistJoinCodeInput.addEventListener("keypress", (e) => e.stopPropagation());
 
   $("oc-btn-camera").addEventListener("click", startCamera);
   $("oc-btn-screen").addEventListener("click", startScreen);
@@ -1322,8 +1692,8 @@
 
   micBtn.addEventListener("click", requestMic);
 
-  stopBtn.addEventListener("click", stopLive);
-  endBtn.addEventListener("click", stopLive);
+  stopBtn.addEventListener("click", () => { if (isAssistMode) endAssistSession(); else stopLive(); });
+  endBtn.addEventListener("click", () => { if (isAssistMode) endAssistSession(); else stopLive(); });
 
   $("oc-chat-header").addEventListener("click", () => chatPanel.classList.toggle("oc-chat-collapsed"));
 
@@ -1503,6 +1873,14 @@
   (async function autoDetect() {
     const base = getSignalBase();
 
+    var assistCode = checkAssistCodeInUrl();
+    if (assistCode) {
+      modeSelect.style.display = "none";
+      placeholder.style.display = "flex";
+      joinAssistByCode(assistCode);
+      return;
+    }
+
     var broadcasting = false;
     try {
       var stRes = await fetch(base + "/live/api/state");
@@ -1521,9 +1899,9 @@
     console.log("[oc-live] isHost:", isHost, "(openclaw.device.auth.v1", isHost ? "found" : "missing", ")");
 
     if (isHost) {
-      $("oc-mode-label").textContent = "选择模式";
+      $("oc-mode-label").style.display = "none";
       $("oc-host-actions").style.display = "flex";
-      $("oc-btn-settings").style.display = "flex";
+      // settings button hidden
     } else {
       modeSelect.style.display = "none";
       viewerWaiting.style.display = "flex";

@@ -172,9 +172,10 @@ function handleSignaling(ws, url) {
 
     sendTo(ws, { type: "role", role: "broadcaster", viewerCount: viewers.size });
 
-    // Notify all existing viewers that a broadcaster appeared
+    // Notify existing viewers and tell broadcaster about them
     for (const [vid, vws] of viewers.entries()) {
       sendTo(vws, { type: "broadcaster-ready" });
+      sendTo(ws, { type: "viewer-joined", viewerId: vid });
     }
 
     ws.on("message", (raw) => {
@@ -275,7 +276,7 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.log("  ⚠️  首次访问请在浏览器接受证书警告（自签名证书）");
   console.log("  接受后摄像头/麦克风即可正常使用");
   console.log("");
-  console.log("  主播: 点「📷 摄像头」或「🖥 屏幕共享」开播");
+  console.log("  主播: 点「📷 视频直播」或「🖥 屏幕直播」开始");
   console.log("  观众: 打开同一地址即可观看");
   console.log("");
 });
