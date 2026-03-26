@@ -13,6 +13,8 @@ Repository: `https://github.com/wordixai/claw-live`
 
 ## Install
 
+> **Important:** Before proceeding, locate the actual OpenClaw data directory on the host machine. All paths below use `~/.openclaw` as a placeholder — replace it with the real data directory path.
+
 ### 1. Clone the repo
 
 ```bash
@@ -49,6 +51,8 @@ The script auto-detects the Control UI location. If detection fails, pass the pa
 ```bash
 bash ~/.openclaw/plugins/live-stream/scripts/inject.sh /path/to/control-ui
 ```
+
+> **⚠️ Do NOT restart any service after injection.** The overlay takes effect immediately; restarting will undo the injection.
 
 ### 5. Restart the Gateway
 
