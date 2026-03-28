@@ -1,1591 +1,610 @@
 /**
- * OpenClaw Live Stream Overlay (WebRTC P2P Edition)
+ * OpenClaw Assist Overlay (Agora RTC Edition)
  *
- * Broadcaster: opens camera/screen → streams to all viewers via WebRTC
- * Viewer:      connects automatically → receives broadcaster's stream
- * Signaling:   via WebSocket at /live/signal on the proxy server
+ * Host: shares screen via Agora → helpers see it
+ * Helper: joins Agora channel → receives host's screen
+ * Both sides get a simple text chat via REST API + SSE.
  */
 (function () {
   "use strict";
 
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").then(
-      (r) => console.log("[oc-live] SW registered, scope:", r.scope),
-      (e) => console.warn("[oc-live] SW registration failed:", e)
-    );
-  }
+  if (document.getElementById("oc-assist-overlay")) return;
 
-  if (document.getElementById("oc-live-overlay")) return;
+  // ── Agora SDK loader ──
+
+  var agoraReady = new Promise(function (resolve, reject) {
+    if (window.AgoraRTC) { resolve(window.AgoraRTC); return; }
+    var s = document.createElement("script");
+    // Load from same origin (injected alongside overlay) to avoid CSP / network issues
+    s.src = "./AgoraRTC_N.js";
+    s.onload = function () { resolve(window.AgoraRTC); };
+    s.onerror = function () { reject(new Error("Failed to load Agora SDK")); };
+    document.head.appendChild(s);
+  });
 
   // ── State ──
 
-  let role = null;           // "broadcaster" | "viewer" | null
-  let myViewerId = null;
-  let localStream = null;
-  let signalWs = null;
-  let peerConnections = {};  // broadcaster: viewerId → RTCPeerConnection
-  let viewerPc = null;       // viewer: single RTCPeerConnection to broadcaster
-  let isLive = false;
-  let startedAt = null;
-  let viewerCount = 0;
-  let danmakuCount = 0;
-  let durationTimer = null;
-  let danmakuTrack = 0;
-  const TRACK_COUNT = 8;
-  function getIceServers() {
-    const cfg = loadConfig();
-    const servers = [{ urls: "stun:stun.l.google.com:19302" }];
-    if (cfg.turnServer) {
-      servers.push({ urls: cfg.turnServer, username: cfg.turnUser || "", credential: cfg.turnPass || "" });
-    }
-    return servers;
+  var role = null;           // "host" | "helper" | null
+  var agoraClient = null;
+  var localScreenTrack = null;
+  var localAudioTrack = null;  // system audio from screen share
+  var localMicTrack = null;
+  var isMicOn = false;
+  var isSharing = false;
+  var startedAt = null;
+  var durationTimer = null;
+  var sessionData = null;
+  var agoraCredentials = null; // { appId, token, channel } from server API
+
+  // ── Config ──
+
+  var CFG_KEY = "oc-assist-config";
+  function loadConfig() {
+    try { return JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch { return {}; }
   }
+  function saveConfig(cfg) { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
 
-  let micPc = null;          // RTCPeerConnection for cohost audio
-  let micStream = null;      // viewer's local mic stream
-  let cohostViewerId = null;  // broadcaster: which viewer is co-hosting
-  let isCohostActive = false;
-
-  let bubbleExpandTimer = null;
-  let bubbleCollapseTimer = null;
-
-  function enterBubbleMode() {
-    overlay.classList.remove("oc-minimized");
-    overlay.classList.add("oc-bubble");
-  }
-
-  function exitBubbleMode() {
-    overlay.classList.remove("oc-bubble");
+  function getApiBase() {
+    return location.protocol + "//" + location.host;
   }
 
   // ── Inline CSS ──
 
-  const style = document.createElement("style");
+  var style = document.createElement("style");
   style.textContent = `
-/* ── Design Tokens ── */
-#oc-live-overlay{
-  --oc-bg:       #ffffff;
-  --oc-bg-alt:   #f7f8fa;
-  --oc-surface:  #f0f1f3;
-  --oc-border:   #e2e4e9;
-  --oc-border-h: #c8cbd1;
-  --oc-text:     #1a1d23;
-  --oc-text-2:   #5f6672;
-  --oc-text-3:   #9199a5;
-  --oc-accent:   #e53935;
-  --oc-accent-g: linear-gradient(135deg,#e53935,#ff5722);
-  --oc-blue:     #1976d2;
-  --oc-cyan:     #0097a7;
-  --oc-green:    #2e7d32;
-  --oc-accent-live:   #e53935;
-  --oc-accent-assist: #0097a7;
-  --oc-focus-ring:    rgba(229,57,53,0.35);
-  --oc-focus-glow:    rgba(229,57,53,0.08);
-  --oc-radius:   14px;
-  --oc-radius-sm:8px;
-  --oc-radius-pill:100px;
-  --oc-sp-1:4px; --oc-sp-2:8px; --oc-sp-3:12px; --oc-sp-4:16px; --oc-sp-5:20px; --oc-sp-6:24px; --oc-sp-8:32px;
-  --oc-font: -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","Helvetica Neue",sans-serif;
-  --oc-fast: 150ms cubic-bezier(.4,0,.2,1);
-  --oc-norm: 250ms cubic-bezier(.4,0,.2,1);
-  --oc-slow: 400ms cubic-bezier(.4,0,.2,1);
+#oc-assist-overlay{
+  --oc-bg:#ffffff; --oc-bg-alt:#f7f8fa; --oc-surface:#f0f1f3;
+  --oc-border:#e2e4e9; --oc-border-h:#c8cbd1;
+  --oc-text:#1a1d23; --oc-text-2:#5f6672; --oc-text-3:#9199a5;
+  --oc-accent:#0097a7; --oc-accent-g:linear-gradient(135deg,#0097a7,#00838f);
+  --oc-danger:#e53935; --oc-green:#2e7d32;
+  --oc-radius:14px; --oc-radius-sm:8px; --oc-radius-pill:100px;
+  --oc-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","Helvetica Neue",sans-serif;
+  --oc-fast:150ms cubic-bezier(.4,0,.2,1);
+  --oc-norm:250ms cubic-bezier(.4,0,.2,1);
 }
-
-/* ── Container ── */
-#oc-live-overlay{
-  position:fixed;bottom:var(--oc-sp-6);right:var(--oc-sp-6);width:380px;height:480px;min-width:300px;min-height:380px;
+#oc-assist-overlay{
+  position:fixed;bottom:24px;right:24px;width:380px;height:520px;min-width:300px;min-height:400px;
   z-index:99999;border-radius:var(--oc-radius);overflow:hidden;
   background:var(--oc-bg);
   box-shadow:0 8px 32px rgba(0,0,0,0.12),0 0 0 1px var(--oc-border);
   font-family:var(--oc-font);font-size:13px;color:var(--oc-text);
   display:flex;flex-direction:column;user-select:none;
-  transition:width var(--oc-norm),height var(--oc-norm),border-radius var(--oc-norm),opacity var(--oc-fast);
-  animation:oc-slide-in var(--oc-slow) both;
+  animation:oc-slide-in var(--oc-norm) both;
 }
 @keyframes oc-slide-in{from{opacity:0;transform:translateY(12px) scale(.97);}to{opacity:1;transform:none;}}
+#oc-assist-overlay.oc-minimized{width:220px!important;height:42px!important;min-height:42px;border-radius:var(--oc-radius-pill);}
+#oc-assist-overlay.oc-minimized .oc-body,
+#oc-assist-overlay.oc-minimized .oc-chat-panel{display:none;}
+#oc-assist-overlay.oc-fullscreen{top:0!important;left:0!important;right:0!important;bottom:0!important;width:100%!important;height:100%!important;border-radius:0;}
+#oc-assist-overlay.oc-hidden{display:none;animation:none;}
 
-#oc-live-overlay.oc-minimized{width:220px!important;height:42px!important;min-height:42px;border-radius:var(--oc-radius-pill);}
-#oc-live-overlay.oc-minimized .oc-live-header{border-bottom:none;padding:0 var(--oc-sp-4);height:42px;}
-#oc-live-overlay.oc-minimized .oc-live-body,
-#oc-live-overlay.oc-minimized .oc-live-footer{display:none;}
-#oc-live-overlay.oc-fullscreen{top:0!important;left:0!important;right:0!important;bottom:0!important;width:100%!important;height:100%!important;border-radius:0;}
-#oc-live-overlay.oc-hidden{display:none;animation:none;}
-
-/* ── Header ── */
-.oc-live-header{
-  display:flex;align-items:center;gap:var(--oc-sp-3);
-  padding:var(--oc-sp-2) var(--oc-sp-4);
+.oc-header{
+  display:flex;align-items:center;gap:10px;
+  padding:0 16px;height:46px;min-height:46px;
   background:var(--oc-bg);border-bottom:1px solid var(--oc-border);
-  cursor:move;flex-shrink:0;min-height:42px;
+  cursor:move;flex-shrink:0;
 }
-.oc-live-dot{width:8px;height:8px;border-radius:50%;background:#c8cbd1;flex-shrink:0;transition:all var(--oc-norm);}
-.oc-live-dot.oc-live-on{background:var(--oc-accent);box-shadow:0 0 8px var(--oc-accent),0 0 20px rgba(239,68,68,0.2);animation:oc-pulse 2s ease-in-out infinite;}
+#oc-assist-overlay.oc-minimized .oc-header{border-bottom:none;}
+.oc-dot{width:8px;height:8px;border-radius:50%;background:#c8cbd1;flex-shrink:0;transition:all var(--oc-norm);}
+.oc-dot.oc-on{background:var(--oc-accent);box-shadow:0 0 8px var(--oc-accent);animation:oc-pulse 2s ease-in-out infinite;}
 @keyframes oc-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.85);}}
-
-.oc-live-title{flex:1;color:var(--oc-text);font-size:13px;font-weight:600;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.oc-live-viewers{color:var(--oc-text-3);font-size:12px;font-weight:500;white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums;}
-.oc-live-controls{display:flex;gap:2px;flex-shrink:0;}
-.oc-live-btn{
+.oc-title{flex:1;font-size:13px;font-weight:600;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.oc-controls{display:flex;gap:2px;flex-shrink:0;}
+.oc-btn{
   width:30px;height:30px;border:none;background:transparent;border-radius:var(--oc-radius-sm);
   color:var(--oc-text-3);font-size:14px;cursor:pointer;
   display:flex;align-items:center;justify-content:center;
-  transition:all var(--oc-fast);padding:0;line-height:1;
+  transition:all var(--oc-fast);padding:0;
 }
-.oc-live-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
-.oc-live-btn:active{transform:scale(.9);}
-#oc-live-overlay button:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px;}
+.oc-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
+.oc-btn:active{transform:scale(.9);}
 
-/* ── Body ── */
-.oc-live-body{flex:1;position:relative;overflow:hidden;background:var(--oc-bg-alt);}
-.oc-live-video{width:100%;height:100%;object-fit:contain;background:#1a1d23;display:block;}
+.oc-body{flex:1;position:relative;overflow:hidden;background:var(--oc-bg-alt);}
+#oc-video-container{width:100%;height:100%;background:#1a1d23;display:none;}
+#oc-video-container video,#oc-video-container div{width:100%!important;height:100%!important;object-fit:contain!important;}
 
-/* ── Placeholder / Mode Select ── */
-.oc-live-placeholder{
+.oc-placeholder{
   position:absolute;inset:0;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:0;
-  background:var(--oc-bg-alt);z-index:1;
+  align-items:center;justify-content:center;gap:16px;
+  background:var(--oc-bg-alt);z-index:1;padding:24px;
 }
-
-#oc-mode-select{display:flex;flex-direction:column;align-items:center;width:100%;padding:0 var(--oc-sp-8);gap:0;}
-.oc-mode-label{color:var(--oc-text-2);font-size:10px;letter-spacing:2.5px;text-transform:uppercase;font-weight:700;margin-bottom:var(--oc-sp-5);}
-
-.oc-mode-actions{display:flex;gap:var(--oc-sp-3);width:100%;margin-bottom:0;}
-.oc-action-card{
-  flex:1;display:flex;flex-direction:column;align-items:center;gap:var(--oc-sp-3);
-  padding:var(--oc-sp-5) var(--oc-sp-3);border-radius:var(--oc-radius-sm);
-  border:1px solid var(--oc-border);background:#ffffff;
-  cursor:pointer;transition:all var(--oc-fast);position:relative;overflow:hidden;
+.oc-start-btn{
+  width:100%;max-width:260px;height:44px;border:none;border-radius:var(--oc-radius-sm);
+  background:var(--oc-accent-g);color:#fff;
+  font-size:14px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
 }
-.oc-action-card::before{
-  content:"";position:absolute;inset:0;opacity:0;
-  transition:opacity var(--oc-norm);border-radius:inherit;
+.oc-start-btn:hover{opacity:.88;transform:translateY(-1px);}
+.oc-start-btn:active{transform:translateY(0) scale(.98);}
+.oc-join-section{display:flex;flex-direction:column;align-items:center;gap:10px;width:100%;max-width:260px;}
+.oc-divider{width:80%;height:1px;background:var(--oc-border);margin:4px 0;}
+.oc-divider-text{font-size:11px;color:var(--oc-text-3);margin:-4px 0;}
+.oc-join-row{display:flex;gap:8px;width:100%;}
+.oc-join-input{
+  flex:1;height:40px;border:2px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:#fff;color:var(--oc-text);font-size:18px;font-weight:700;
+  letter-spacing:3px;text-align:center;text-transform:uppercase;
+  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;
+  outline:none;transition:border-color var(--oc-fast);
 }
-.oc-action-card:nth-child(1)::before{background:radial-gradient(circle at 50% 30%,rgba(0,151,167,0.06),transparent 70%);}
-.oc-action-card:nth-child(2)::before{background:radial-gradient(circle at 50% 30%,rgba(229,57,53,0.06),transparent 70%);}
-.oc-action-card:nth-child(3)::before{background:radial-gradient(circle at 50% 30%,rgba(25,118,210,0.06),transparent 70%);}
-.oc-action-card:hover{border-color:var(--oc-border-h);transform:translateY(-2px);background:#ffffff;box-shadow:0 4px 12px rgba(0,0,0,0.06);}
-.oc-action-card:hover::before{opacity:1;}
-.oc-action-card:active{transform:translateY(0) scale(.98);}
-
-.oc-action-icon{
-  width:44px;height:44px;border-radius:12px;
-  display:flex;align-items:center;justify-content:center;font-size:20px;
-  transition:transform var(--oc-fast);
+.oc-join-input:focus{border-color:var(--oc-accent);}
+.oc-join-btn{
+  height:40px;padding:0 16px;border:none;border-radius:var(--oc-radius-sm);
+  background:var(--oc-accent-g);color:#fff;font-size:13px;font-weight:600;
+  cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);white-space:nowrap;
 }
-.oc-action-card:hover .oc-action-icon{transform:scale(1.1);}
-.oc-action-icon.oc-red{background:rgba(229,57,53,0.08);color:#e53935;}
-.oc-action-icon.oc-blue{background:rgba(25,118,210,0.08);color:#1976d2;}
+.oc-join-btn:hover{opacity:.88;}
+.oc-join-error{font-size:11px;color:var(--oc-danger);display:none;}
 
-.oc-action-name{color:var(--oc-text);font-size:12px;font-weight:600;letter-spacing:.3px;}
-.oc-action-card:hover .oc-action-name{color:var(--oc-text);}
-
-.oc-mode-divider{width:60%;height:1px;background:var(--oc-border);margin:var(--oc-sp-4) 0;}
-
-.oc-viewer-card{
-  display:flex;align-items:center;justify-content:center;gap:var(--oc-sp-2);
-  padding:var(--oc-sp-3) var(--oc-sp-6);border-radius:var(--oc-radius-pill);
-  border:1px solid var(--oc-border);background:#ffffff;
-  cursor:pointer;transition:all var(--oc-fast);
+.oc-session-panel{
+  position:absolute;inset:0;display:none;flex-direction:column;
+  align-items:center;justify-content:flex-start;gap:0;
+  background:var(--oc-bg-alt);z-index:2;padding:16px 20px;overflow-y:auto;
 }
-.oc-viewer-card:hover{background:rgba(25,118,210,0.04);border-color:rgba(25,118,210,0.3);}
-.oc-viewer-card:active{transform:scale(.97);}
-.oc-viewer-dot{width:7px;height:7px;border-radius:50%;background:var(--oc-blue);box-shadow:0 0 6px rgba(25,118,210,0.4);animation:oc-dot-blink 2.5s ease-in-out infinite;}
-@keyframes oc-dot-blink{0%,100%{opacity:1;}50%{opacity:.3;}}
-.oc-viewer-card span{color:var(--oc-text-2);font-size:12px;font-weight:500;}
-.oc-viewer-card:hover span{color:var(--oc-text);}
-.oc-viewer-card{margin-bottom:var(--oc-sp-4);}
+.oc-session-status{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--oc-text-2);margin-bottom:12px;}
+.oc-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.oc-status-dot.oc-waiting{background:#f59e0b;animation:oc-pulse 2s ease-in-out infinite;}
+.oc-status-dot.oc-connected{background:var(--oc-green);box-shadow:0 0 6px rgba(46,125,50,0.4);}
+.oc-code-box{
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding:16px;border-radius:var(--oc-radius);
+  background:#fff;border:1px solid var(--oc-border);width:100%;margin-bottom:12px;
+}
+.oc-code-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--oc-text-3);}
+.oc-code{
+  font-size:24px;font-weight:800;letter-spacing:5px;color:var(--oc-text);
+  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;user-select:all;
+}
+.oc-link-row{display:flex;align-items:center;gap:8px;width:100%;}
+.oc-link-input{
+  flex:1;height:30px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:var(--oc-surface);color:var(--oc-text-2);font-size:11px;
+  padding:0 10px;outline:none;font-family:var(--oc-font);
+}
+.oc-copy-btn{
+  height:30px;padding:0 10px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
+  background:#fff;color:var(--oc-text-2);font-size:11px;font-weight:600;
+  cursor:pointer;transition:all var(--oc-fast);white-space:nowrap;font-family:var(--oc-font);
+}
+.oc-copy-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
+.oc-copy-btn.oc-copied{background:rgba(46,125,50,0.08);color:var(--oc-green);border-color:rgba(46,125,50,0.3);}
+.oc-hint{font-size:11px;color:var(--oc-text-3);text-align:center;line-height:1.4;margin-bottom:12px;}
+.oc-share-btn{
+  width:100%;height:40px;border:none;border-radius:var(--oc-radius-sm);
+  background:var(--oc-accent-g);color:#fff;font-size:13px;font-weight:600;
+  cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);margin-bottom:12px;
+}
+.oc-share-btn:hover{opacity:.88;transform:translateY(-1px);}
+.oc-end-btn{
+  height:30px;padding:0 16px;border:1px solid rgba(229,57,53,0.2);border-radius:var(--oc-radius-pill);
+  background:rgba(229,57,53,0.06);color:var(--oc-danger);
+  font-size:11px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
+}
+.oc-end-btn:hover{background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.35);}
 
-/* ── Viewer Waiting ── */
-#oc-viewer-waiting{flex-direction:column;align-items:center;gap:var(--oc-sp-3);}
+.oc-badge{
+  position:absolute;top:10px;left:10px;z-index:4;
+  padding:4px 10px;border-radius:var(--oc-radius-pill);
+  background:rgba(0,151,167,0.9);color:#fff;
+  font-size:11px;font-weight:600;display:none;align-items:center;gap:5px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.08);
+}
+.oc-badge-dot{width:6px;height:6px;border-radius:50%;background:#fff;animation:oc-pulse 2s ease-in-out infinite;}
+.oc-end-overlay-btn{
+  position:absolute;top:10px;right:10px;z-index:4;
+  padding:4px 10px;border:none;border-radius:var(--oc-radius-pill);
+  background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
+  color:var(--oc-text-2);font-size:11px;font-weight:600;cursor:pointer;
+  transition:all var(--oc-fast);box-shadow:0 2px 8px rgba(0,0,0,0.08);display:none;
+}
+.oc-end-overlay-btn:hover{background:#fff;color:var(--oc-text);}
+
+.oc-media-bar{
+  position:absolute;bottom:12px;left:50%;transform:translateX(-50%);z-index:4;
+  display:none;align-items:center;gap:8px;
+  padding:6px 10px;border-radius:var(--oc-radius-pill);
+  background:rgba(0,0,0,0.55);backdrop-filter:blur(12px);
+  box-shadow:0 2px 12px rgba(0,0,0,0.15);
+}
+.oc-media-btn{
+  width:36px;height:36px;border:none;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all var(--oc-fast);padding:0;
+  color:#fff;background:rgba(255,255,255,0.15);
+}
+.oc-media-btn:hover{background:rgba(255,255,255,0.25);}
+.oc-media-btn.oc-active{background:var(--oc-accent);}
+.oc-media-btn.oc-mic-off{background:var(--oc-danger);}
+.oc-media-btn.oc-mic-off:hover{background:#c62828;}
+
+.oc-waiting-state{display:none;flex-direction:column;align-items:center;gap:10px;}
 .oc-spinner{width:28px;height:28px;border:2.5px solid var(--oc-border);border-top-color:var(--oc-accent);border-radius:50%;animation:oc-spin .8s linear infinite;}
 @keyframes oc-spin{to{transform:rotate(360deg);}}
 
-/* ── Danmaku ── */
-.oc-danmaku-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2;}
-.oc-danmaku-item{position:absolute;white-space:nowrap;font-size:14px;font-weight:600;text-shadow:0 1px 3px rgba(255,255,255,0.9),0 0 2px rgba(255,255,255,0.6);animation:oc-danmaku-fly linear forwards;pointer-events:none;}
-@keyframes oc-danmaku-fly{from{transform:translateX(100%);}to{transform:translateX(-100%);}}
-
-/* ── Chat Panel ── */
 .oc-chat-panel{
   display:flex;flex-direction:column;flex-shrink:0;
   border-top:1px solid var(--oc-border);background:var(--oc-bg);
-  height:140px;min-height:36px;
-  transition:height var(--oc-fast);overflow:hidden;
+  height:160px;min-height:40px;transition:height var(--oc-fast);overflow:hidden;
 }
-.oc-chat-panel.oc-chat-collapsed{height:36px;}
+.oc-chat-panel.oc-collapsed{height:40px;}
 .oc-chat-header{
   display:flex;align-items:center;justify-content:space-between;
-  padding:0 var(--oc-sp-4);height:36px;min-height:36px;flex-shrink:0;
-  background:var(--oc-bg);cursor:pointer;
+  padding:0 16px;height:40px;min-height:40px;flex-shrink:0;cursor:pointer;
 }
-.oc-chat-title{font-size:12px;font-weight:700;color:var(--oc-text);letter-spacing:.3px;}
+.oc-chat-label{font-size:12px;font-weight:700;color:var(--oc-text);letter-spacing:.3px;}
 .oc-chat-toggle{
   width:24px;height:24px;border:none;background:transparent;border-radius:var(--oc-radius-sm);
   color:var(--oc-text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;
   transition:all var(--oc-fast);padding:0;font-size:12px;
 }
 .oc-chat-toggle:hover{background:var(--oc-surface);color:var(--oc-text);}
-.oc-chat-panel.oc-chat-collapsed .oc-chat-toggle{transform:rotate(180deg);}
-.oc-chat-list{
-  flex:1;overflow-y:auto;overflow-x:hidden;padding:0 var(--oc-sp-3) var(--oc-sp-2);
-  scrollbar-width:thin;scrollbar-color:var(--oc-border) transparent;
-}
+.oc-chat-panel.oc-collapsed .oc-chat-toggle{transform:rotate(180deg);}
+.oc-chat-list{flex:1;overflow-y:auto;padding:0 12px 8px;scrollbar-width:thin;scrollbar-color:var(--oc-border) transparent;}
 .oc-chat-list::-webkit-scrollbar{width:4px;}
-.oc-chat-list::-webkit-scrollbar-track{background:transparent;}
 .oc-chat-list::-webkit-scrollbar-thumb{background:var(--oc-border);border-radius:2px;}
-.oc-chat-item{
-  display:flex;align-items:flex-start;gap:var(--oc-sp-2);
-  padding:var(--oc-sp-1) 0;animation:oc-chat-in var(--oc-fast) both;
-}
+.oc-chat-item{display:flex;align-items:flex-start;gap:8px;padding:3px 0;animation:oc-chat-in var(--oc-fast) both;}
 @keyframes oc-chat-in{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
 .oc-chat-avatar{
   width:24px;height:24px;border-radius:50%;flex-shrink:0;
   display:flex;align-items:center;justify-content:center;
-  font-size:11px;font-weight:700;color:#fff;
-  background:var(--oc-text-3);
+  font-size:11px;font-weight:700;color:#fff;background:var(--oc-text-3);
 }
 .oc-chat-body{flex:1;min-width:0;}
-.oc-chat-meta{display:flex;align-items:baseline;gap:var(--oc-sp-2);}
-.oc-chat-sender{font-size:11px;font-weight:600;color:var(--oc-text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px;}
-.oc-chat-time{font-size:9px;color:var(--oc-text-3);white-space:nowrap;font-variant-numeric:tabular-nums;}
+.oc-chat-meta{display:flex;align-items:baseline;gap:6px;}
+.oc-chat-sender{font-size:11px;font-weight:600;color:var(--oc-text-2);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.oc-chat-time{font-size:9px;color:var(--oc-text-3);font-variant-numeric:tabular-nums;}
 .oc-chat-text{font-size:12px;color:var(--oc-text);line-height:1.4;word-break:break-word;margin-top:1px;}
-.oc-chat-empty{
-  display:flex;align-items:center;justify-content:center;height:100%;
-  color:var(--oc-text-3);font-size:11px;font-weight:500;
+.oc-chat-empty{display:flex;align-items:center;justify-content:center;height:100%;color:var(--oc-text-3);font-size:11px;}
+.oc-chat-input-row{
+  display:flex;align-items:center;gap:6px;padding:6px 12px;
+  border-top:1px solid var(--oc-border);flex-shrink:0;
 }
-
-#oc-live-overlay.oc-minimized .oc-chat-panel{display:none;}
-#oc-live-overlay.oc-bubble .oc-chat-panel{display:none!important;}
-#oc-live-overlay.oc-fullscreen .oc-chat-panel{height:200px;}
-
-/* ── Footer ── */
-.oc-live-footer{
-  display:flex;align-items:center;gap:var(--oc-sp-3);
-  padding:var(--oc-sp-3) var(--oc-sp-4);
-  background:var(--oc-bg);border-top:1px solid var(--oc-border);flex-shrink:0;min-height:48px;
+.oc-chat-input{
+  flex:1;height:34px;border:1.5px solid transparent;border-radius:var(--oc-radius-pill);
+  background:var(--oc-surface);color:var(--oc-text);font-size:13px;padding:0 16px;
+  outline:none;font-family:var(--oc-font);transition:all var(--oc-fast);
 }
-.oc-footer-stats{
-  display:flex;align-items:center;gap:var(--oc-sp-2);flex-shrink:0;
-  color:var(--oc-text-3);font-size:12px;font-variant-numeric:tabular-nums;
-}
-.oc-footer-stats .oc-stat-sep{
-  width:1px;height:14px;background:var(--oc-border);margin:0 2px;
-}
-.oc-live-stat{color:var(--oc-text-3);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:3px;}
-.oc-live-stat b{color:var(--oc-text-2);font-weight:600;}
-.oc-dm-wrap{
-  flex:1;display:flex;align-items:center;min-width:0;
-  height:40px;border:1.5px solid transparent;border-radius:var(--oc-radius-pill);
-  background:var(--oc-surface);transition:all var(--oc-fast);padding:3px;box-sizing:border-box;
-}
-.oc-dm-wrap:focus-within{background:#ffffff;border-color:var(--oc-focus-ring);box-shadow:0 0 0 3px var(--oc-focus-glow);}
-.oc-danmaku-input{
-  flex:1;height:100%;border:none;border-radius:var(--oc-radius-pill);
-  background:transparent;color:var(--oc-text);font-size:13px;padding:0 var(--oc-sp-5);
-  outline:none;min-width:0;
-}
-.oc-danmaku-input:focus,.oc-danmaku-input:focus-visible{outline:none;border:none;box-shadow:none;}
-.oc-danmaku-input::placeholder{color:var(--oc-text-3);}
-.oc-danmaku-send-btn{
-  height:34px;padding:0 18px;border:none;border-radius:var(--oc-radius-pill);
+.oc-chat-input:focus{background:#fff;border-color:rgba(0,151,167,0.35);box-shadow:0 0 0 3px rgba(0,151,167,0.08);}
+.oc-chat-input::placeholder{color:var(--oc-text-3);}
+.oc-chat-send{
+  height:34px;padding:0 14px;border:none;border-radius:var(--oc-radius-pill);
   background:var(--oc-accent);color:#fff;font-size:13px;font-weight:600;
-  cursor:pointer;flex-shrink:0;transition:all var(--oc-fast);
+  cursor:pointer;flex-shrink:0;transition:all var(--oc-fast);font-family:var(--oc-font);
 }
-.oc-danmaku-send-btn:hover{opacity:.88;}
-.oc-danmaku-send-btn:active{transform:scale(.97);}
+.oc-chat-send:hover{opacity:.88;}
+.oc-chat-send:active{transform:scale(.97);}
+.oc-chat-panel.oc-collapsed .oc-chat-input-row{display:none;}
 
-/* ── Resize Handle ── */
-.oc-resize-handle{position:absolute;top:2px;left:2px;width:22px;height:22px;cursor:nw-resize;z-index:10;}
-.oc-resize-handle::after{content:"";position:absolute;top:5px;left:5px;width:8px;height:8px;border-top:2px solid var(--oc-border);border-left:2px solid var(--oc-border);border-radius:1px 0 0 0;transition:border-color var(--oc-fast);}
-.oc-resize-handle:hover::after{border-color:var(--oc-border-h);}
+.oc-resize{position:absolute;top:2px;left:2px;width:22px;height:22px;cursor:nw-resize;z-index:10;}
+.oc-resize::after{content:"";position:absolute;top:5px;left:5px;width:8px;height:8px;border-top:2px solid var(--oc-border);border-left:2px solid var(--oc-border);border-radius:1px 0 0 0;transition:border-color var(--oc-fast);}
+.oc-resize:hover::after{border-color:var(--oc-border-h);}
 
-/* ── Toggle FAB ── */
-#oc-live-toggle{
+#oc-assist-toggle{
   position:fixed;bottom:24px;right:24px;width:46px;height:46px;
   border-radius:50%;border:none;
-  background:#ffffff;color:var(--oc-text-2,#5f6672);font-size:18px;
-  cursor:grab;z-index:99998;
+  background:#fff;color:var(--oc-text-2,#5f6672);font-size:18px;
+  cursor:pointer;z-index:99998;
   box-shadow:0 2px 12px rgba(0,0,0,0.1),0 0 0 1px rgba(0,0,0,0.06);
   display:none;align-items:center;justify-content:center;
-  transition:transform 150ms cubic-bezier(.4,0,.2,1),color 150ms,box-shadow 150ms;
-  touch-action:none;
+  transition:transform var(--oc-fast),color var(--oc-fast),box-shadow var(--oc-fast);
 }
-#oc-live-toggle:hover{color:#e53935;box-shadow:0 4px 20px rgba(0,0,0,0.14),0 0 0 1px rgba(229,57,53,0.3);}
-#oc-live-toggle.oc-dragging{cursor:grabbing;box-shadow:0 6px 24px rgba(0,0,0,0.18),0 0 0 1px rgba(0,0,0,0.08);transform:scale(1.08);}
-#oc-live-toggle.oc-visible{display:flex;animation:oc-fab-in 250ms cubic-bezier(.4,0,.2,1) both;}
+#oc-assist-toggle:hover{color:var(--oc-accent);box-shadow:0 4px 20px rgba(0,0,0,0.14),0 0 0 1px rgba(0,151,167,0.3);}
+#oc-assist-toggle.oc-visible{display:flex;animation:oc-fab-in var(--oc-norm) both;}
 @keyframes oc-fab-in{from{opacity:0;transform:scale(.5);}to{opacity:1;transform:scale(1);}}
 
-/* ── Bubble Mode (circular camera window when live) ── */
-#oc-live-overlay.oc-bubble{
-  width:168px!important;height:168px!important;min-width:168px!important;min-height:168px!important;
-  border-radius:50%;cursor:grab;
-  box-shadow:0 4px 20px rgba(0,0,0,0.12),0 0 0 2.5px rgba(229,57,53,0.35);
-  transition:width var(--oc-norm),height var(--oc-norm),border-radius var(--oc-norm),
-             box-shadow var(--oc-norm),transform var(--oc-fast),opacity var(--oc-fast);
-}
-#oc-live-overlay.oc-bubble:active{cursor:grabbing;}
-#oc-live-overlay.oc-bubble .oc-live-header,
-#oc-live-overlay.oc-bubble .oc-live-footer,
-#oc-live-overlay.oc-bubble .oc-resize-handle,
-#oc-live-overlay.oc-bubble .oc-danmaku-layer,
-#oc-live-overlay.oc-bubble .oc-live-source-badge,
-#oc-live-overlay.oc-bubble .oc-live-end-btn,
-#oc-live-overlay.oc-bubble .oc-settings-panel,
-#oc-live-overlay.oc-bubble .oc-live-placeholder{display:none!important;}
-#oc-live-overlay.oc-bubble #oc-assist-panel{display:none!important;}
-#oc-live-overlay.oc-bubble #oc-assist-join{display:none!important;}
-#oc-live-overlay.oc-bubble .oc-live-body{border-radius:50%;overflow:hidden;}
-#oc-live-overlay.oc-bubble .oc-live-video{object-fit:cover;}
-#oc-live-overlay.oc-bubble::after{
-  content:"";position:absolute;bottom:2px;right:2px;width:16px;height:16px;
-  border-radius:50%;background:var(--oc-accent);border:3px solid #ffffff;
-  box-shadow:0 0 6px rgba(229,57,53,0.4);animation:oc-pulse 2s ease-in-out infinite;z-index:10;
-  pointer-events:none;
-}
-#oc-live-overlay.oc-bubble:hover{
-  transform:scale(1.08);
-  box-shadow:0 4px 24px rgba(0,0,0,0.15),0 0 0 3px rgba(229,57,53,0.4);
-}
-
-/* ── Source Badge (LIVE pill) ── */
-.oc-live-source-badge{
-  position:absolute;top:var(--oc-sp-3);left:var(--oc-sp-3);z-index:4;
-  padding:4px 10px;border-radius:var(--oc-radius-pill);
-  background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
-  color:var(--oc-text-2);font-size:11px;font-weight:600;letter-spacing:.3px;
-  display:none;pointer-events:none;
-  box-shadow:0 2px 8px rgba(0,0,0,0.08);
-}
-.oc-live-badge-dot{
-  display:inline-block;width:8px;height:8px;border-radius:50%;
-  background:var(--oc-accent);margin-right:6px;flex-shrink:0;
-  box-shadow:0 0 6px var(--oc-accent);animation:oc-pulse 2s ease-in-out infinite;
-}
-.oc-live-source-badge.oc-visible{display:inline-flex;align-items:center;animation:oc-badge-in var(--oc-norm) both;}
-@keyframes oc-badge-in{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
-
-/* ── Stop / End Buttons ── */
-.oc-live-stop-btn{
-  height:30px;padding:0 12px;
-  border:1px solid rgba(229,57,53,0.2);border-radius:var(--oc-radius-pill);
-  background:rgba(229,57,53,0.06);color:var(--oc-accent);
-  font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;
-  transition:all var(--oc-fast);
-}
-.oc-live-stop-btn:hover{background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.35);}
-.oc-live-end-btn{
-  position:absolute;top:var(--oc-sp-3);right:var(--oc-sp-3);z-index:4;
-  padding:4px 10px;border:none;border-radius:var(--oc-radius-pill);
-  background:rgba(255,255,255,0.92);backdrop-filter:blur(12px);
-  color:var(--oc-text-2);font-size:11px;font-weight:600;cursor:pointer;
-  transition:all var(--oc-fast);
-  box-shadow:0 2px 8px rgba(0,0,0,0.08);
-}
-.oc-live-end-btn:hover{background:#ffffff;color:var(--oc-text);box-shadow:0 4px 14px rgba(0,0,0,0.12);transform:scale(1.04);}
-.oc-live-end-btn:active{transform:scale(.96);}
-
-/* ── Audio Toggle ── */
-#oc-audio-unlock{
-  position:absolute;bottom:var(--oc-sp-3);right:var(--oc-sp-3);z-index:6;
-  width:32px;height:32px;padding:0;border:none;border-radius:50%;
-  background:rgba(0,0,0,0.52);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
-  color:#fff;cursor:pointer;
-  display:none;align-items:center;justify-content:center;
-  box-shadow:0 2px 8px rgba(0,0,0,0.2);
-  transition:background var(--oc-fast),transform var(--oc-fast);
-}
-#oc-audio-unlock:hover{background:rgba(0,0,0,0.8);transform:scale(1.12);}
-#oc-audio-unlock:active{transform:scale(.92);}
-#oc-live-overlay.oc-bubble #oc-audio-unlock{display:none!important;}
-#oc-live-overlay.oc-bubble #oc-mic-btn{display:none!important;}
-
-/* ── Cohost (连麦) ── */
-#oc-mic-btn{
-  position:absolute;bottom:var(--oc-sp-3);left:var(--oc-sp-3);z-index:6;
-  height:32px;padding:0 12px;border:none;border-radius:var(--oc-radius-pill);
-  background:rgba(0,0,0,0.52);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
-  color:#fff;cursor:pointer;font-size:12px;font-weight:600;font-family:var(--oc-font);
-  display:none;align-items:center;gap:5px;
-  box-shadow:0 2px 8px rgba(0,0,0,0.2);
-  transition:background var(--oc-fast),transform var(--oc-fast);
-}
-#oc-mic-btn:hover{background:rgba(0,0,0,0.8);transform:scale(1.05);}
-#oc-mic-btn:active{transform:scale(.92);}
-#oc-mic-btn.oc-mic-active{background:rgba(229,57,53,0.85);}
-#oc-mic-btn.oc-mic-pending{background:rgba(255,152,0,0.75);pointer-events:none;}
-
-.oc-mic-request-popup{
-  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;
-  background:rgba(255,255,255,0.97);backdrop-filter:blur(16px);
-  border-radius:var(--oc-radius);padding:var(--oc-sp-6);
-  box-shadow:0 12px 40px rgba(0,0,0,0.18),0 0 0 1px var(--oc-border);
-  display:flex;flex-direction:column;align-items:center;gap:var(--oc-sp-4);
-  min-width:220px;animation:oc-settings-in var(--oc-norm) both;
-}
-.oc-mic-request-title{font-size:14px;font-weight:700;color:var(--oc-text);}
-.oc-mic-request-sub{font-size:12px;color:var(--oc-text-2);text-align:center;}
-.oc-mic-request-actions{display:flex;gap:var(--oc-sp-3);width:100%;}
-.oc-mic-request-actions button{
-  flex:1;height:36px;border-radius:var(--oc-radius-sm);font-size:12px;font-weight:600;
-  cursor:pointer;border:none;transition:all var(--oc-fast);font-family:var(--oc-font);
-}
-.oc-mic-accept{background:var(--oc-green);color:#fff;}
-.oc-mic-accept:hover{opacity:.88;}
-.oc-mic-decline{background:var(--oc-surface);color:var(--oc-text-2);border:1px solid var(--oc-border)!important;}
-.oc-mic-decline:hover{background:var(--oc-border);}
-
-.oc-cohost-badge{
-  position:absolute;top:var(--oc-sp-3);right:60px;z-index:6;
-  padding:4px 10px;border-radius:var(--oc-radius-pill);
-  background:rgba(46,125,50,0.9);color:#fff;font-size:11px;font-weight:600;
-  display:none;align-items:center;gap:5px;
-  animation:oc-badge-in var(--oc-norm) both;
-}
-.oc-cohost-badge .oc-cohost-dot{
-  width:6px;height:6px;border-radius:50%;background:#fff;animation:oc-pulse 2s ease-in-out infinite;
-}
-
-/* ── Settings Panel ── */
-.oc-settings-panel{
+.oc-settings{
   position:absolute;inset:0;background:rgba(255,255,255,0.97);backdrop-filter:blur(16px);
-  z-index:5;padding:var(--oc-sp-6);
-  display:flex;flex-direction:column;gap:var(--oc-sp-4);overflow-y:auto;
-  animation:oc-settings-in var(--oc-norm) both;
+  z-index:5;padding:24px;display:none;flex-direction:column;gap:16px;overflow-y:auto;
 }
-@keyframes oc-settings-in{from{opacity:0;}to{opacity:1;}}
-.oc-settings-title{font-size:14px;font-weight:700;color:var(--oc-text);margin-bottom:var(--oc-sp-1);display:flex;align-items:center;gap:var(--oc-sp-2);}
+.oc-settings-title{font-size:14px;font-weight:700;color:var(--oc-text);}
 .oc-settings-label{display:flex;flex-direction:column;gap:6px;color:var(--oc-text-2);font-size:11px;letter-spacing:.8px;text-transform:uppercase;font-weight:600;}
 .oc-settings-input{
   height:36px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
-  background:#ffffff;color:var(--oc-text);font-size:13px;
-  padding:0 var(--oc-sp-4);outline:none;transition:all var(--oc-fast);font-family:var(--oc-font);
+  background:#fff;color:var(--oc-text);font-size:13px;padding:0 14px;outline:none;
+  transition:all var(--oc-fast);font-family:var(--oc-font);
 }
-.oc-settings-input:focus{border-color:rgba(229,57,53,0.35);background:#ffffff;box-shadow:0 0 0 3px rgba(229,57,53,0.06);}
-.oc-settings-actions{display:flex;gap:var(--oc-sp-3);margin-top:var(--oc-sp-3);}
+.oc-settings-input:focus{border-color:rgba(0,151,167,0.35);box-shadow:0 0 0 3px rgba(0,151,167,0.06);}
+.oc-settings-actions{display:flex;gap:10px;margin-top:8px;}
 .oc-settings-save,.oc-settings-cancel{
   flex:1;height:36px;border-radius:var(--oc-radius-sm);font-size:12px;font-weight:600;
-  cursor:pointer;transition:all var(--oc-fast);border:1px solid transparent;
+  cursor:pointer;transition:all var(--oc-fast);border:1px solid transparent;font-family:var(--oc-font);
 }
 .oc-settings-save{background:var(--oc-accent-g);color:#fff;border:none;}
-.oc-settings-save:hover{opacity:.88;transform:translateY(-1px);}
+.oc-settings-save:hover{opacity:.88;}
 .oc-settings-cancel{background:var(--oc-surface);color:var(--oc-text-2);border-color:var(--oc-border);}
-.oc-settings-cancel:hover{background:var(--oc-border);color:var(--oc-text);}
+.oc-settings-cancel:hover{background:var(--oc-border);}
 
-/* ── Assist Mode ── */
-.oc-action-card.oc-assist-card{border-color:rgba(0,151,167,0.25);}
-.oc-action-card.oc-assist-card::before{background:radial-gradient(circle at 50% 30%,rgba(0,151,167,0.06),transparent 70%);}
-.oc-action-icon.oc-cyan{background:rgba(0,151,167,0.08);color:#0097a7;}
-
-#oc-assist-panel{
-  position:absolute;inset:0;display:flex;flex-direction:column;
-  align-items:center;justify-content:flex-start;gap:0;
-  background:var(--oc-bg-alt);z-index:3;padding:var(--oc-sp-4) var(--oc-sp-5);
-  overflow-y:auto;
-  animation:oc-settings-in var(--oc-norm) both;
-}
-.oc-assist-status{
-  display:flex;align-items:center;gap:var(--oc-sp-2);
-  font-size:12px;font-weight:600;color:var(--oc-text-2);
-  margin-bottom:var(--oc-sp-3);
-}
-.oc-assist-status-dot{
-  width:8px;height:8px;border-radius:50%;flex-shrink:0;
-}
-.oc-assist-status-dot.oc-waiting{background:#f59e0b;animation:oc-pulse 2s ease-in-out infinite;}
-.oc-assist-status-dot.oc-connected{background:var(--oc-green);box-shadow:0 0 6px rgba(46,125,50,0.4);}
-
-.oc-assist-code-box{
-  display:flex;flex-direction:column;align-items:center;gap:var(--oc-sp-2);
-  padding:var(--oc-sp-4);border-radius:var(--oc-radius);
-  background:#fff;border:1px solid var(--oc-border);width:100%;
-  margin-bottom:var(--oc-sp-3);
-}
-.oc-assist-code-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--oc-text-3);}
-.oc-assist-code{
-  font-size:24px;font-weight:800;letter-spacing:5px;color:var(--oc-text);
-  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;
-  user-select:all;
-}
-.oc-assist-link-row{
-  display:flex;align-items:center;gap:var(--oc-sp-2);width:100%;
-}
-.oc-assist-link-input{
-  flex:1;height:30px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
-  background:var(--oc-surface);color:var(--oc-text-2);font-size:11px;
-  padding:0 var(--oc-sp-3);outline:none;font-family:var(--oc-font);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-}
-.oc-assist-copy-btn{
-  height:30px;padding:0 10px;border:1px solid var(--oc-border);border-radius:var(--oc-radius-sm);
-  background:#fff;color:var(--oc-text-2);font-size:11px;font-weight:600;
-  cursor:pointer;transition:all var(--oc-fast);white-space:nowrap;font-family:var(--oc-font);
-}
-.oc-assist-copy-btn:hover{background:var(--oc-surface);color:var(--oc-text);}
-.oc-assist-copy-btn:active{transform:scale(.96);}
-.oc-assist-copy-btn.oc-copied{background:rgba(46,125,50,0.08);color:var(--oc-green);border-color:rgba(46,125,50,0.3);}
-
-.oc-assist-hint{font-size:11px;color:var(--oc-text-3);text-align:center;line-height:1.4;margin-bottom:var(--oc-sp-3);}
-
-.oc-assist-share-btn{
-  width:100%;height:38px;border:none;border-radius:var(--oc-radius-sm);
-  background:linear-gradient(135deg,#0097a7,#00838f);color:#fff;
-  font-size:13px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
-  margin-bottom:var(--oc-sp-3);flex-shrink:0;
-}
-.oc-assist-share-btn:hover{opacity:.88;transform:translateY(-1px);}
-.oc-assist-share-btn:active{transform:translateY(0) scale(.98);}
-
-.oc-assist-end-btn{
-  height:30px;padding:0 16px;border:1px solid rgba(229,57,53,0.2);border-radius:var(--oc-radius-pill);
-  background:rgba(229,57,53,0.06);color:var(--oc-accent);
-  font-size:11px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
-  flex-shrink:0;
-}
-.oc-assist-end-btn:hover{background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.35);}
-
-#oc-assist-badge{
-  position:absolute;top:var(--oc-sp-3);left:var(--oc-sp-3);z-index:4;
-  padding:4px 10px;border-radius:var(--oc-radius-pill);
-  background:rgba(0,151,167,0.9);color:#fff;
-  font-size:11px;font-weight:600;display:none;align-items:center;gap:5px;
-  box-shadow:0 2px 8px rgba(0,0,0,0.08);
-  animation:oc-badge-in var(--oc-norm) both;
-}
-#oc-assist-badge .oc-assist-badge-dot{
-  width:6px;height:6px;border-radius:50%;background:#fff;animation:oc-pulse 2s ease-in-out infinite;
-}
-
-/* ── Assist join page (for assistant entering via code) ── */
-#oc-assist-join{
-  position:absolute;inset:0;display:none;flex-direction:column;
-  align-items:center;justify-content:center;gap:var(--oc-sp-4);
-  background:var(--oc-bg-alt);z-index:3;padding:var(--oc-sp-6);
-}
-.oc-assist-join-title{font-size:14px;font-weight:700;color:var(--oc-text);}
-.oc-assist-join-input{
-  width:180px;height:44px;border:2px solid var(--oc-border);border-radius:var(--oc-radius-sm);
-  background:#fff;color:var(--oc-text);font-size:22px;font-weight:700;
-  letter-spacing:4px;text-align:center;text-transform:uppercase;
-  font-family:"SF Mono",Monaco,"Cascadia Code",monospace;
-  outline:none;transition:border-color var(--oc-fast);
-}
-.oc-assist-join-input:focus{border-color:var(--oc-accent-assist);}
-.oc-assist-join-btn{
-  width:180px;height:40px;border:none;border-radius:var(--oc-radius-sm);
-  background:linear-gradient(135deg,#0097a7,#00838f);color:#fff;
-  font-size:13px;font-weight:600;cursor:pointer;transition:all var(--oc-fast);font-family:var(--oc-font);
-}
-.oc-assist-join-btn:hover{opacity:.88;}
-.oc-assist-join-error{font-size:11px;color:var(--oc-accent);display:none;}
-
-/* Reduced motion: keep state cues without looping animations */
 @media (prefers-reduced-motion: reduce){
-  #oc-live-overlay{animation:none;}
-  .oc-live-dot.oc-live-on{animation:none!important;}
-  .oc-viewer-dot{animation:none!important;}
-  .oc-spinner{animation:none!important;border-top-color:var(--oc-accent);}
-  #oc-live-toggle.oc-visible{animation:none;}
-  .oc-live-source-badge.oc-visible{animation:none;}
-  .oc-live-badge-dot{animation:none!important;}
-  #oc-live-overlay.oc-bubble::after{animation:none!important;}
-  .oc-cohost-badge .oc-cohost-dot{animation:none!important;}
-  .oc-settings-panel,.oc-mic-request-popup{animation:none!important;}
+  #oc-assist-overlay{animation:none;}
+  .oc-dot.oc-on,.oc-status-dot.oc-waiting,.oc-badge-dot,.oc-spinner{animation:none!important;}
+  #oc-assist-toggle.oc-visible{animation:none;}
 }
 `;
   document.head.appendChild(style);
 
   // ── Build DOM ──
 
-  const overlay = document.createElement("div");
-  overlay.id = "oc-live-overlay";
+  var overlay = document.createElement("div");
+  overlay.id = "oc-assist-overlay";
   overlay.innerHTML = `
-    <div class="oc-resize-handle" id="oc-resize"></div>
-    <div class="oc-live-header" id="oc-drag-handle">
-      <span class="oc-live-dot" id="oc-dot"></span>
-      <span class="oc-live-title" id="oc-title">OpenClaw Live</span>
-      <span class="oc-live-viewers" id="oc-viewers"></span>
-      <div class="oc-live-controls">
-        <button class="oc-live-btn" id="oc-btn-settings" title="设置" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>
-        <button class="oc-live-btn" id="oc-btn-bubble" title="悬浮窗" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/></svg></button>
-        <button class="oc-live-btn" id="oc-btn-min" title="最小化"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-        <button class="oc-live-btn" id="oc-btn-fs" title="全屏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg></button>
-        <button class="oc-live-btn" id="oc-btn-close" title="隐藏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    <div class="oc-resize" id="oc-resize"></div>
+    <div class="oc-header" id="oc-drag">
+      <span class="oc-dot" id="oc-dot"></span>
+      <span class="oc-title" id="oc-title">远程协助</span>
+      <div class="oc-controls">
+        <button class="oc-btn" id="oc-btn-settings" title="设置"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>
+        <button class="oc-btn" id="oc-btn-min" title="最小化"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <button class="oc-btn" id="oc-btn-fs" title="全屏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg></button>
+        <button class="oc-btn" id="oc-btn-close" title="隐藏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
-    <div class="oc-live-body" id="oc-body">
-      <video class="oc-live-video" id="oc-video" autoplay muted playsinline></video>
-      <div class="oc-live-placeholder" id="oc-placeholder">
-        <div id="oc-mode-select">
-          <span class="oc-mode-label" id="oc-mode-label">直播间</span>
-          <div class="oc-mode-actions" id="oc-host-actions" style="display:none;">
-            <div class="oc-action-card oc-assist-card" id="oc-btn-assist">
-              <div class="oc-action-icon oc-cyan"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
-              <span class="oc-action-name">远程协助</span>
-            </div>
-            <div class="oc-action-card" id="oc-btn-camera">
-              <div class="oc-action-icon oc-red"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></div>
-              <span class="oc-action-name">视频直播</span>
-            </div>
-            <div class="oc-action-card" id="oc-btn-screen">
-              <div class="oc-action-icon oc-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg></div>
-              <span class="oc-action-name">屏幕直播</span>
-            </div>
+    <div class="oc-body" id="oc-body">
+      <div id="oc-video-container"></div>
+      <div class="oc-placeholder" id="oc-placeholder">
+        <button class="oc-start-btn" id="oc-btn-start">发起协助</button>
+        <div class="oc-divider"></div>
+        <span class="oc-divider-text">或输入会话码加入</span>
+        <div class="oc-join-section">
+          <div class="oc-join-row">
+            <input class="oc-join-input" id="oc-join-code" maxlength="6" placeholder="会话码" />
+            <button class="oc-join-btn" id="oc-btn-join">加入</button>
           </div>
-          <div class="oc-mode-divider" id="oc-mode-divider" style="display:none;"></div>
-          <div class="oc-viewer-card" id="oc-btn-viewer" style="display:none;">
-            <div class="oc-viewer-dot"></div>
-            <span>进入观看</span>
-          </div>
-        </div>
-        <div id="oc-viewer-waiting" style="display:none;">
-          <div class="oc-spinner"></div>
-          <span style="color:var(--oc-text-2,rgba(255,255,255,0.55));font-size:12px;font-weight:500;">等待主播开播</span>
-          <span style="color:var(--oc-text-3,rgba(255,255,255,0.28));font-size:10px;">主播开始后画面自动出现</span>
+          <span class="oc-join-error" id="oc-join-error">会话码无效或已过期</span>
         </div>
       </div>
-      <div class="oc-danmaku-layer" id="oc-danmaku"></div>
-      <div class="oc-live-source-badge" id="oc-source-badge"></div>
-      <button class="oc-live-end-btn" id="oc-btn-end">结束直播</button>
-      <button id="oc-audio-unlock" title="点击开启音频"></button>
-      <button id="oc-mic-btn" title="连麦"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg><span>连麦</span></button>
-      <div class="oc-cohost-badge" id="oc-cohost-badge"><span class="oc-cohost-dot"></span>连麦中</div>
-      <div id="oc-assist-badge"><span class="oc-assist-badge-dot"></span><span id="oc-assist-badge-text">协助中</span></div>
-      <div id="oc-assist-panel" style="display:none;">
-        <div class="oc-assist-status" id="oc-assist-status">
-          <span class="oc-assist-status-dot oc-waiting" id="oc-assist-status-dot"></span>
-          <span id="oc-assist-status-text">等待协助者加入</span>
+      <div class="oc-session-panel" id="oc-session-panel">
+        <div class="oc-session-status" id="oc-session-status">
+          <span class="oc-status-dot oc-waiting" id="oc-session-dot"></span>
+          <span id="oc-session-text">等待协助者加入</span>
         </div>
-        <div class="oc-assist-code-box">
-          <span class="oc-assist-code-label">会话码</span>
-          <span class="oc-assist-code" id="oc-assist-code">------</span>
-          <div class="oc-assist-link-row">
-            <input class="oc-assist-link-input" id="oc-assist-link" readonly />
-            <button class="oc-assist-copy-btn" id="oc-assist-copy">复制链接</button>
+        <div class="oc-code-box">
+          <span class="oc-code-label">会话码</span>
+          <span class="oc-code" id="oc-session-code">------</span>
+          <div class="oc-link-row">
+            <input class="oc-link-input" id="oc-session-link" readonly />
+            <button class="oc-copy-btn" id="oc-copy-link">复制链接</button>
           </div>
         </div>
-        <span class="oc-assist-hint">把会话码或链接发给协助者<br/>对方打开后即可加入</span>
-        <button class="oc-assist-share-btn" id="oc-assist-share-screen">共享屏幕给协助者</button>
-        <button class="oc-assist-end-btn" id="oc-assist-end">结束会话</button>
+        <span class="oc-hint">把会话码或链接发给协助者<br/>对方打开后即可加入</span>
+        <button class="oc-share-btn" id="oc-btn-share-screen">共享屏幕给协助者</button>
+        <button class="oc-end-btn" id="oc-btn-end-session">结束会话</button>
       </div>
-      <div id="oc-assist-join" style="display:none;">
-        <span class="oc-assist-join-title">加入协助会话</span>
-        <input class="oc-assist-join-input" id="oc-assist-join-code" maxlength="6" placeholder="输入会话码" />
-        <button class="oc-assist-join-btn" id="oc-assist-join-btn">加入</button>
-        <span class="oc-assist-join-error" id="oc-assist-join-error">会话码无效或已过期</span>
+      <div class="oc-waiting-state" id="oc-waiting">
+        <div class="oc-spinner"></div>
+        <span style="color:var(--oc-text-2);font-size:12px;font-weight:500;">正在连接…</span>
       </div>
-      <div class="oc-settings-panel" id="oc-settings" style="display:none;">
-        <div class="oc-settings-title">⚙ 连接设置</div>
-        <label class="oc-settings-label">信令服务器地址
-          <input class="oc-settings-input" id="oc-cfg-signal-host" placeholder="如 192.168.1.6 (留空=当前主机)" />
-        </label>
-        <label class="oc-settings-label">信令服务器端口
-          <input class="oc-settings-input" id="oc-cfg-signal-port" type="number" placeholder="留空=当前端口" />
-        </label>
-        <label class="oc-settings-label">房间标题
-          <input class="oc-settings-input" id="oc-cfg-title" placeholder="OpenClaw Live" />
-        </label>
-        <div style="height:1px;background:var(--oc-border);margin:var(--oc-sp-2) 0;"></div>
-        <label class="oc-settings-label">TURN 服务器 <span style="opacity:0.5;text-transform:none;letter-spacing:0;">(可选, 远程部署需要)</span>
-          <input class="oc-settings-input" id="oc-cfg-turn-server" placeholder="turn:your-server.com:3478" />
-        </label>
-        <label class="oc-settings-label">TURN 用户名
-          <input class="oc-settings-input" id="oc-cfg-turn-user" placeholder="username" />
-        </label>
-        <label class="oc-settings-label">TURN 密码
-          <input class="oc-settings-input" id="oc-cfg-turn-pass" type="password" placeholder="password" />
-        </label>
+      <div class="oc-badge" id="oc-badge"><span class="oc-badge-dot"></span><span id="oc-badge-text">协助中</span></div>
+      <div class="oc-media-bar" id="oc-media-bar">
+        <button class="oc-media-btn" id="oc-btn-mic" title="开启麦克风"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></button>
+      </div>
+      <button class="oc-end-overlay-btn" id="oc-btn-end-overlay">结束</button>
+      <div class="oc-settings" id="oc-settings">
+        <div class="oc-settings-title">设置</div>
+        <div style="color:var(--oc-text-2);font-size:12px;line-height:1.6;">Agora 凭据由服务端管理，无需手动配置。</div>
         <div class="oc-settings-actions">
-          <button class="oc-settings-save" id="oc-cfg-save">保存</button>
-          <button class="oc-settings-cancel" id="oc-cfg-cancel">取消</button>
+          <button class="oc-settings-cancel" id="oc-cfg-cancel">关闭</button>
         </div>
       </div>
     </div>
     <div class="oc-chat-panel" id="oc-chat-panel">
       <div class="oc-chat-header" id="oc-chat-header">
-        <span class="oc-chat-title">Live Chat</span>
-        <button class="oc-chat-toggle" id="oc-chat-toggle"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+        <span class="oc-chat-label">聊天</span>
+        <button class="oc-chat-toggle" id="oc-chat-toggle"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg></button>
       </div>
       <div class="oc-chat-list" id="oc-chat-list">
         <div class="oc-chat-empty" id="oc-chat-empty">暂无消息</div>
       </div>
-    </div>
-    <div class="oc-live-footer">
-      <div class="oc-footer-stats">
-        <span class="oc-live-stat" id="oc-stat-duration">00:00</span>
-        <span class="oc-stat-sep"></span>
-        <span class="oc-live-stat" id="oc-stat-dm"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg><b>0</b></span>
-      </div>
-      <span class="oc-live-stat" id="oc-stat-role" style="color:var(--oc-accent,#ef4444);font-weight:600;display:none;"></span>
-      <button class="oc-live-stop-btn" id="oc-btn-stop" style="display:none;">关播</button>
-      <div class="oc-dm-wrap">
-        <input class="oc-danmaku-input" id="oc-dm-input" placeholder="发弹幕..." />
-        <button class="oc-danmaku-send-btn" id="oc-dm-send">发送</button>
+      <div class="oc-chat-input-row">
+        <input class="oc-chat-input" id="oc-chat-input" placeholder="输入消息…" />
+        <button class="oc-chat-send" id="oc-chat-send">发送</button>
       </div>
     </div>
   `;
   document.body.appendChild(overlay);
 
-  const toggleBtn = document.createElement("button");
-  toggleBtn.id = "oc-live-toggle";
-  toggleBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
-  toggleBtn.title = "打开直播面板";
+  var toggleBtn = document.createElement("button");
+  toggleBtn.id = "oc-assist-toggle";
+  toggleBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+  toggleBtn.title = "远程协助";
   document.body.appendChild(toggleBtn);
 
   // ── Element refs ──
 
-  const $ = (id) => document.getElementById(id);
-  const dot = $("oc-dot");
-  const titleEl = $("oc-title");
-  const viewersEl = $("oc-viewers");
-  const video = $("oc-video");
-  const placeholder = $("oc-placeholder");
-  const danmakuLayer = $("oc-danmaku");
-  const statDuration = $("oc-stat-duration");
-  const statDm = $("oc-stat-dm");
-  const statRole = $("oc-stat-role");
-  const dmInput = $("oc-dm-input");
-  const stopBtn = $("oc-btn-stop");
-  const bubbleBtn = $("oc-btn-bubble");
-  const sourceBadge = $("oc-source-badge");
-  const modeSelect = $("oc-mode-select");
-  const viewerWaiting = $("oc-viewer-waiting");
-  const endBtn = $("oc-btn-end");
-  const audioUnlockBtn = $("oc-audio-unlock");
-  const settingsPanel = $("oc-settings");
-  const cfgSignalHost = $("oc-cfg-signal-host");
-  const cfgSignalPort = $("oc-cfg-signal-port");
-  const cfgTitle = $("oc-cfg-title");
-  const cfgTurnServer = $("oc-cfg-turn-server");
-  const cfgTurnUser = $("oc-cfg-turn-user");
-  const cfgTurnPass = $("oc-cfg-turn-pass");
-  const chatPanel = $("oc-chat-panel");
-  const chatList = $("oc-chat-list");
-  const chatEmpty = $("oc-chat-empty");
-  const micBtn = $("oc-mic-btn");
-  const cohostBadge = $("oc-cohost-badge");
-  const assistPanel = $("oc-assist-panel");
-  const assistCode = $("oc-assist-code");
-  const assistLink = $("oc-assist-link");
-  const assistCopyBtn = $("oc-assist-copy");
-  const assistStatusDot = $("oc-assist-status-dot");
-  const assistStatusText = $("oc-assist-status-text");
-  const assistBadge = $("oc-assist-badge");
-  const assistBadgeText = $("oc-assist-badge-text");
-  const assistJoinPanel = $("oc-assist-join");
-  const assistJoinCodeInput = $("oc-assist-join-code");
-  const assistJoinError = $("oc-assist-join-error");
+  var $ = function (id) { return document.getElementById(id); };
+  var dot = $("oc-dot");
+  var titleEl = $("oc-title");
+  var videoContainer = $("oc-video-container");
+  var placeholder = $("oc-placeholder");
+  var sessionPanel = $("oc-session-panel");
+  var sessionCode = $("oc-session-code");
+  var sessionLink = $("oc-session-link");
+  var sessionDot = $("oc-session-dot");
+  var sessionText = $("oc-session-text");
+  var waitingState = $("oc-waiting");
+  var badge = $("oc-badge");
+  var badgeText = $("oc-badge-text");
+  var endOverlayBtn = $("oc-btn-end-overlay");
+  var joinError = $("oc-join-error");
+  var joinCodeInput = $("oc-join-code");
+  var settingsPanel = $("oc-settings");
+  var mediaBar = $("oc-media-bar");
+  var micBtn = $("oc-btn-mic");
+  var chatPanel = $("oc-chat-panel");
+  var chatList = $("oc-chat-list");
+  var chatEmpty = $("oc-chat-empty");
+  var chatInput = $("oc-chat-input");
 
-  let assistSessionData = null;
-  let isAssistMode = false;
-
-  // ── Initialize UI state ──
-  video.style.display = "none";
-  placeholder.style.display = "flex";
-  endBtn.style.display = "none";
-  stopBtn.style.display = "none";
-
-
-  // ── Config (localStorage) ──
-
-  const CFG_KEY = "oc-live-config";
-  function loadConfig() {
-    try { return JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch { return {}; }
-  }
-  function saveConfig(cfg) { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
-
-  function getSignalBase() {
-    const cfg = loadConfig();
-    if (cfg.signalHost) {
-      const port = cfg.signalPort || location.port || (location.protocol === "https:" ? "443" : "80");
-      const proto = location.protocol;
-      return `${proto}//${cfg.signalHost}:${port}`;
-    }
-    return `${location.protocol}//${location.host}`;
-  }
-
-  // populate settings fields from saved config
-  (function initSettings() {
-    const cfg = loadConfig();
-    cfgSignalHost.value = cfg.signalHost || "";
-    cfgSignalPort.value = cfg.signalPort || "";
-    cfgTitle.value = cfg.roomTitle || "";
-    cfgTurnServer.value = cfg.turnServer || "";
-    cfgTurnUser.value = cfg.turnUser || "";
-    cfgTurnPass.value = cfg.turnPass || "";
+  // ── Init settings ──
+  (function () {
+    loadConfig();
   })();
 
-  $("oc-btn-settings").addEventListener("click", () => {
-    const visible = settingsPanel.style.display !== "none";
-    settingsPanel.style.display = visible ? "none" : "flex";
-  });
-
-  $("oc-cfg-save").addEventListener("click", () => {
-    const cfg = {
-      signalHost: cfgSignalHost.value.trim(),
-      signalPort: cfgSignalPort.value.trim(),
-      roomTitle: cfgTitle.value.trim(),
-      turnServer: cfgTurnServer.value.trim(),
-      turnUser: cfgTurnUser.value.trim(),
-      turnPass: cfgTurnPass.value.trim(),
-    };
-    saveConfig(cfg);
-    if (cfg.roomTitle) titleEl.textContent = cfg.roomTitle;
-    settingsPanel.style.display = "none";
-  });
-
-  $("oc-cfg-cancel").addEventListener("click", () => {
-    const cfg = loadConfig();
-    cfgSignalHost.value = cfg.signalHost || "";
-    cfgSignalPort.value = cfg.signalPort || "";
-    cfgTitle.value = cfg.roomTitle || "";
-    cfgTurnServer.value = cfg.turnServer || "";
-    cfgTurnUser.value = cfg.turnUser || "";
-    cfgTurnPass.value = cfg.turnPass || "";
-    settingsPanel.style.display = "none";
-  });
-
   // ══════════════════════════════════
-  //  Signaling via SSE + POST
+  //  Agora RTC — Host (screen share)
   // ══════════════════════════════════
 
-  let signalEs = null;
-  let myClientId = null;
+  async function agoraShareScreen() {
+    if (!agoraCredentials || !agoraCredentials.appId) throw new Error("Agora 未配置，请在服务端设置 AGORA_APP_ID 和 AGORA_APP_CERTIFICATE 环境变量");
+    var AgoraRTC = await agoraReady;
+    AgoraRTC.setLogLevel(3); // warnings only
 
-  function connectSignal(asRole) {
-    const base = getSignalBase();
-    const eventsUrl = `${base}/live/signal/events?role=${asRole}`;
-    signalEs = new EventSource(eventsUrl);
+    agoraClient = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
 
-    signalEs.onopen = () => console.log("[signal] SSE connected as", asRole);
+    await agoraClient.join(agoraCredentials.appId, agoraCredentials.channel, agoraCredentials.token, null);
 
-    signalEs.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.clientId && !myClientId) {
-          myClientId = msg.clientId;
-          console.log("[signal] assigned clientId:", myClientId);
-        }
-        handleSignalMessage(msg);
-      } catch {}
-    };
+    localScreenTrack = await AgoraRTC.createScreenVideoTrack(
+      { encoderConfig: "1080p_2" },
+      "auto"
+    );
 
-    signalEs.onerror = () => {
-      console.log("[signal] SSE error/disconnected");
-      if (signalEs) { signalEs.close(); signalEs = null; }
-      myClientId = null;
-      if (role === "viewer") {
-        setTimeout(() => connectSignal("viewer"), 3000);
-      }
-    };
-  }
-
-  function sendSignal(msg) {
-    if (!myClientId) return;
-    const base = getSignalBase();
-    fetch(`${base}/live/signal/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId: myClientId, ...msg }),
-    }).catch(() => {});
-  }
-
-  function handleSignalMessage(msg) {
-    switch (msg.type) {
-
-      // ── Common ──
-      case "role":
-        role = msg.role;
-        myViewerId = msg.viewerId || null;
-        statRole.textContent = role === "broadcaster" ? "🔴 主播" : "👁 观众";
-        if (role === "broadcaster") {
-          stopBtn.style.display = isLive ? "block" : "none";
-          endBtn.style.display = isLive ? "block" : "none";
-        }
-        if (role === "viewer") {
-          modeSelect.style.display = "none";
-          if (msg.streamInfo?.live) {
-            viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播在线，正在连接</span>';
-          }
-          viewerWaiting.style.display = "flex";
-        }
-        break;
-
-      case "viewer-count":
-        viewerCount = msg.count;
-        updateViewerBadge();
-        break;
-
-      case "stream-info":
-        if (msg.title) titleEl.textContent = msg.title;
-        if (msg.viewerCount != null) viewerCount = msg.viewerCount;
-        updateViewerBadge();
-        break;
-
-      // ── Broadcaster receives ──
-      case "viewer-joined":
-        createOfferForViewer(msg.viewerId);
-        break;
-
-      case "viewer-left":
-        if (peerConnections[msg.viewerId]) {
-          peerConnections[msg.viewerId].close();
-          delete peerConnections[msg.viewerId];
-        }
-        break;
-
-      case "answer":
-        if (peerConnections[msg.viewerId]) {
-          peerConnections[msg.viewerId].setRemoteDescription(
-            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
-          );
-        }
-        break;
-
-      case "ice-candidate":
-        if (role === "broadcaster" && msg.viewerId && peerConnections[msg.viewerId]) {
-          peerConnections[msg.viewerId].addIceCandidate(new RTCIceCandidate(msg.candidate));
-        }
-        if (role === "viewer" && viewerPc) {
-          viewerPc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-        }
-        break;
-
-      // ── Viewer receives ──
-      case "broadcaster-ready":
-        viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播在线，等待连接</span>';
-        break;
-
-      case "offer":
-        handleOfferFromBroadcaster(msg.sdp);
-        break;
-
-      case "broadcaster-left": {
-        const wasBubble = overlay.classList.contains("oc-bubble");
-        cleanupCohost();
-        if (viewerPc) { viewerPc.close(); viewerPc = null; }
-        video.srcObject = null;
-        isLive = false;
-        audioUnlockBtn.style.display = "none";
-        micBtn.style.display = "none";
-        exitBubbleMode();
-        updateUI(null);
-        if (isAssistMode) {
-          viewerWaiting.innerHTML = '<span style="color:var(--oc-text-2);font-size:13px;font-weight:600;">协助会话已结束</span><span style="color:var(--oc-text-3);font-size:11px;">对方已结束屏幕共享</span>';
-        } else {
-          viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2,#888);font-size:12px;font-weight:500;">主播已离开，等待重新开播</span>';
-        }
-        viewerWaiting.style.display = "flex";
-        placeholder.style.display = "flex";
-        video.style.display = "none";
-        if (wasBubble) {
-          overlay.classList.add("oc-hidden");
-          toggleBtn.classList.add("oc-visible");
-        }
-        break;
-      }
-
-      case "danmaku":
-        spawnDanmaku(msg.text, msg.color, msg.sender);
-        break;
-
-      // ── Cohost (连麦) ──
-      case "mic-request":
-        showMicRequestPopup(msg.viewerId);
-        break;
-
-      case "mic-accept":
-        onMicAccepted();
-        break;
-
-      case "mic-reject":
-        onMicRejected();
-        break;
-
-      case "mic-offer":
-        handleMicOffer(msg.viewerId, msg.sdp);
-        break;
-
-      case "mic-answer":
-        handleMicAnswer(msg.sdp);
-        break;
-
-      case "mic-ice":
-        if (micPc && msg.candidate) {
-          micPc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
-        }
-        break;
-
-      case "mic-stop":
-        onMicStopped(msg.viewerId);
-        break;
-
-      case "error":
-        alert(msg.message);
-        break;
+    // createScreenVideoTrack with "auto" may return [videoTrack, audioTrack]
+    if (Array.isArray(localScreenTrack)) {
+      localAudioTrack = localScreenTrack[1];
+      localScreenTrack = localScreenTrack[0];
     }
-  }
 
-  // ══════════════════════════════════
-  //  Broadcaster: WebRTC
-  // ══════════════════════════════════
+    var tracksToPublish = [localScreenTrack];
+    if (localAudioTrack) tracksToPublish.push(localAudioTrack);
+    await agoraClient.publish(tracksToPublish);
 
-  async function createOfferForViewer(viewerId) {
-    if (!localStream) return;
+    localScreenTrack.on("track-ended", function () { endSession(); });
 
-    const pc = new RTCPeerConnection({ iceServers: getIceServers() });
-    peerConnections[viewerId] = pc;
-
-    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        sendSignal({ type: "ice-candidate", viewerId, candidate: e.candidate });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-        pc.close();
-        delete peerConnections[viewerId];
-      }
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    sendSignal({ type: "offer", viewerId, sdp: offer.sdp });
-  }
-
-  // ══════════════════════════════════
-  //  Viewer: WebRTC
-  // ══════════════════════════════════
-
-  async function handleOfferFromBroadcaster(sdp) {
-    if (viewerPc) { viewerPc.close(); }
-
-    viewerPc = new RTCPeerConnection({ iceServers: getIceServers() });
-
-    viewerPc.onicecandidate = (e) => {
-      if (e.candidate) {
-        sendSignal({ type: "ice-candidate", candidate: e.candidate });
-      }
-    };
-
-    viewerPc.ontrack = (e) => {
-      video.srcObject = e.streams[0];
-      video.muted = true;
-      video.play().catch(() => {});
-      isLive = true;
-      startedAt = startedAt || Date.now();
-      placeholder.style.display = "none";
-      video.style.display = "block";
-      if (isAssistMode) {
-        updateUI("🛠 协助中");
-        assistBadge.style.display = "flex";
-        assistBadgeText.textContent = "协助中";
-        micBtn.style.display = "none";
-        video.muted = false;
-        video.play().catch(() => {});
-        setTimeout(() => sendSignal({ type: "mic-request" }), 1500);
-      } else {
-        updateUI("📡 观看中");
-        micBtn.style.display = "flex";
-      }
-      audioUnlockBtn.style.display = "flex";
-      syncAudioBtn();
-      setTimeout(() => enterBubbleMode(), 500);
-    };
-
-    viewerPc.onconnectionstatechange = () => {
-      if (viewerPc.connectionState === "failed") {
-        viewerPc.close();
-        viewerPc = null;
-        video.srcObject = null;
-        placeholder.style.display = "flex";
-        video.style.display = "none";
-      }
-    };
-
-    await viewerPc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp }));
-    const answer = await viewerPc.createAnswer();
-    await viewerPc.setLocalDescription(answer);
-    sendSignal({ type: "answer", sdp: answer.sdp });
-  }
-
-  // ══════════════════════════════════
-  //  Start / Stop Streaming
-  // ══════════════════════════════════
-
-  function checkSecureContext() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert("当前页面不是安全上下文，无法使用摄像头/麦克风。\n\n请使用以下方式之一：\n• http://localhost 访问\n• HTTPS 访问\n• Chrome 设置 chrome://flags/#unsafely-treat-insecure-origin-as-secure 添加当前地址");
-      return false;
-    }
-    return true;
-  }
-
-  async function startCamera() {
-    if (!checkSecureContext()) return;
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-        audio: true,
-      });
-      goLive("📷 摄像头");
-    } catch (err) {
-      alert("无法访问摄像头: " + err.message);
-    }
-  }
-
-  async function startScreen() {
-    if (!checkSecureContext()) return;
-    try {
-      localStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always" },
-        audio: true,
-      });
-      localStream.getVideoTracks()[0].addEventListener("ended", () => stopLive());
-      goLive("🖥 屏幕直播");
-    } catch (err) {
-      if (err.name !== "AbortError" && err.name !== "NotAllowedError") {
-        alert("屏幕共享失败: " + err.message);
-      }
-    }
-  }
-
-  function goLive(sourceLabel) {
-    video.srcObject = localStream;
-    video.play().catch(() => {});
-    isLive = true;
-    role = "broadcaster";
+    localScreenTrack.play(videoContainer);
+    videoContainer.style.display = "block";
+    isSharing = true;
+    role = "host";
     startedAt = Date.now();
-    statRole.textContent = "🔴 主播";
-    connectSignal("broadcaster");
-    updateUI(sourceLabel);
-    setTimeout(() => enterBubbleMode(), 500);
-  }
 
-  function stopLive() {
-    const wasBubble = overlay.classList.contains("oc-bubble");
-    clearTimeout(bubbleExpandTimer);
-    clearTimeout(bubbleCollapseTimer);
-    exitBubbleMode();
-    cleanupCohost();
-    if (localStream) {
-      localStream.getTracks().forEach((t) => t.stop());
-      localStream = null;
-    }
-    for (const pc of Object.values(peerConnections)) pc.close();
-    peerConnections = {};
-    if (viewerPc) { viewerPc.close(); viewerPc = null; }
-    if (signalEs) { signalEs.close(); signalEs = null; myClientId = null; }
-    video.srcObject = null;
-    isLive = false;
-    startedAt = null;
-    role = null;
-    audioUnlockBtn.style.display = "none";
-    micBtn.style.display = "none";
-    assistPanel.style.display = "none";
-    assistBadge.style.display = "none";
-    assistJoinPanel.style.display = "none";
-    if (durationTimer) clearInterval(durationTimer);
-    statRole.textContent = "";
-    stopBtn.textContent = "关播";
-    isAssistMode = false;
-    assistSessionData = null;
-    updateUI(null);
-    modeSelect.style.display = "block";
-    viewerWaiting.style.display = "none";
-    if (wasBubble) {
-      overlay.classList.add("oc-hidden");
-      toggleBtn.classList.add("oc-visible");
-    }
-  }
-
-  // ── UI ──
-
-  function updateViewerBadge() {
-    const text = `LIVE (${viewerCount})`;
-    sourceBadge.innerHTML = `<span class="oc-live-badge-dot"></span>${text}`;
-  }
-
-  function updateUI(sourceLabel) {
-    dot.className = "oc-live-dot" + (isLive ? " oc-live-on" : "");
-    if (isAssistMode && isLive) {
-      dot.style.background = "var(--oc-accent-assist)";
-      dot.style.boxShadow = "0 0 8px var(--oc-accent-assist)";
-    } else if (!isLive) {
-      dot.style.background = "";
-      dot.style.boxShadow = "";
-    }
-    viewersEl.textContent = "";
-    placeholder.style.display = isLive ? "none" : "flex";
-    video.style.display = isLive ? "block" : "none";
-    stopBtn.style.display = (isLive && role === "broadcaster") ? "block" : "none";
-    if (isLive && role === "broadcaster") {
-      endBtn.textContent = isAssistMode ? "结束会话" : "结束直播";
-      endBtn.style.display = "block";
-      if (isAssistMode) {
-        stopBtn.textContent = "结束会话";
-        assistBadge.style.display = "flex";
-      }
-    } else if (isLive && role === "viewer") {
-      endBtn.textContent = isAssistMode ? "离开会话" : "停止观看";
-      endBtn.style.display = "block";
-    } else {
-      endBtn.style.display = "none";
-    }
-    bubbleBtn.style.display = isLive ? "flex" : "none";
-
-    if (sourceLabel) {
-      if (!isAssistMode) {
-        updateViewerBadge();
-        sourceBadge.classList.add("oc-visible");
-      }
-    } else {
-      sourceBadge.classList.remove("oc-visible");
-    }
-
-    if (isLive) {
-      startDurationTimer();
-    } else {
-      statDuration.textContent = "00:00";
-    }
-  }
-
-  function startDurationTimer() {
-    if (durationTimer) clearInterval(durationTimer);
-    const tick = () => {
-      if (!startedAt) return;
-      const s = Math.floor((Date.now() - startedAt) / 1000);
-      const h = Math.floor(s / 3600);
-      const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
-      const sec = String(s % 60).padStart(2, "0");
-      statDuration.textContent = h > 0 ? `${h}:${m}:${sec}` : `${m}:${sec}`;
-    };
-    tick();
-    durationTimer = setInterval(tick, 1000);
-  }
-
-  // ── Danmaku ──
-
-  const CHAT_MAX = 100;
-  const AVATAR_COLORS = ["#e53935","#1976d2","#2e7d32","#f57c00","#7b1fa2","#00838f","#c62828","#283593","#558b2f","#4e342e"];
-
-  function avatarColor(name) {
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-    return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
-  }
-
-  function appendChatMessage(sender, text, color) {
-    if (chatEmpty.style.display !== "none") chatEmpty.style.display = "none";
-    const item = document.createElement("div");
-    item.className = "oc-chat-item";
-    const initial = (sender || "?")[0].toUpperCase();
-    const bg = avatarColor(sender || "?");
-    const now = new Date();
-    const ts = String(now.getHours()).padStart(2,"0") + ":" + String(now.getMinutes()).padStart(2,"0");
-    item.innerHTML =
-      `<div class="oc-chat-avatar" style="background:${bg}">${initial}</div>` +
-      `<div class="oc-chat-body">` +
-        `<div class="oc-chat-meta"><span class="oc-chat-sender">${sender || "匿名"}</span><span class="oc-chat-time">${ts}</span></div>` +
-        `<div class="oc-chat-text">${text.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</div>` +
-      `</div>`;
-    chatList.appendChild(item);
-    while (chatList.children.length > CHAT_MAX + 1) chatList.removeChild(chatList.children[1]);
-    chatList.scrollTop = chatList.scrollHeight;
-  }
-
-  function spawnDanmaku(text, color, sender) {
-    const el = document.createElement("span");
-    el.className = "oc-danmaku-item";
-    el.textContent = text;
-    el.style.color = color || randomColor();
-    const trackHeight = danmakuLayer.clientHeight / TRACK_COUNT;
-    danmakuTrack = (danmakuTrack + 1) % TRACK_COUNT;
-    el.style.top = `${danmakuTrack * trackHeight + 4}px`;
-    el.style.animationDuration = `${6 + Math.random() * 3}s`;
-    el.style.left = `${danmakuLayer.clientWidth}px`;
-    danmakuLayer.appendChild(el);
-    el.addEventListener("animationend", () => el.remove());
-    danmakuCount++;
-    statDm.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:2px;"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg><b>${danmakuCount}</b>`;
-    appendChatMessage(sender, text, color);
-  }
-
-  function sendDanmaku() {
-    const text = dmInput.value.trim();
-    if (!text) return;
-    const color = randomColor();
-    const sender = role === "broadcaster" ? "主播" : (myViewerId || "观众");
-    sendSignal({ type: "danmaku", text, sender, color });
-    dmInput.value = "";
-  }
-
-  function randomColor() {
-    const c = ["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#ff922b","#cc5de8","#20c997","#ffffff","#ffa94d","#74c0fc"];
-    return c[Math.floor(Math.random() * c.length)];
+    sessionPanel.style.display = "none";
+    placeholder.style.display = "none";
+    updateUI();
+    appendChat("系统", "屏幕共享已开始（通过 Agora）");
   }
 
   // ══════════════════════════════════
-  //  Cohost (连麦) Logic
+  //  Agora RTC — Helper (view screen)
   // ══════════════════════════════════
 
-  // ── Viewer: request cohost ──
-  function requestMic() {
-    if (isCohostActive) {
-      stopCohost();
-      return;
-    }
-    micBtn.classList.add("oc-mic-pending");
-    micBtn.querySelector("span").textContent = "请求中…";
-    sendSignal({ type: "mic-request" });
-  }
+  async function agoraJoinAsViewer() {
+    if (!agoraCredentials || !agoraCredentials.appId) throw new Error("Agora 未配置，请在服务端设置 AGORA_APP_ID 和 AGORA_APP_CERTIFICATE 环境变量");
+    var AgoraRTC = await agoraReady;
+    AgoraRTC.setLogLevel(3);
 
-  // ── Viewer: broadcaster accepted ──
-  async function onMicAccepted() {
-    micBtn.classList.remove("oc-mic-pending");
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } catch (err) {
-      if (!isAssistMode) {
-        micBtn.classList.remove("oc-mic-pending", "oc-mic-active");
-        micBtn.querySelector("span").textContent = "连麦";
-        alert("无法访问麦克风: " + err.message);
-      } else {
-        console.warn("[oc-live] Assist: could not get assistant mic:", err.message);
+    agoraClient = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+    agoraClient.on("user-published", async function (user, mediaType) {
+      await agoraClient.subscribe(user, mediaType);
+      if (mediaType === "video") {
+        videoContainer.innerHTML = "";
+        user.videoTrack.play(videoContainer);
+        videoContainer.style.display = "block";
+        waitingState.style.display = "none";
+        placeholder.style.display = "none";
+        isSharing = true;
+        startedAt = startedAt || Date.now();
+        updateUI();
+        appendChat("系统", "已连接，正在查看对方屏幕");
       }
-      sendSignal({ type: "mic-stop" });
-      return;
-    }
-
-    micPc = new RTCPeerConnection({ iceServers: getIceServers() });
-    micStream.getTracks().forEach((t) => micPc.addTrack(t, micStream));
-
-    micPc.onicecandidate = (e) => {
-      if (e.candidate) sendSignal({ type: "mic-ice", candidate: e.candidate });
-    };
-    micPc.onconnectionstatechange = () => {
-      if (micPc && (micPc.connectionState === "failed" || micPc.connectionState === "disconnected")) {
-        stopCohost();
+      if (mediaType === "audio") {
+        user.audioTrack.play();
       }
-    };
-
-    const offer = await micPc.createOffer();
-    await micPc.setLocalDescription(offer);
-    sendSignal({ type: "mic-offer", sdp: offer.sdp });
-
-    isCohostActive = true;
-    if (isAssistMode) {
-      appendChatMessage("系统", "语音已连接", "#0097a7");
-    } else {
-      micBtn.classList.add("oc-mic-active");
-      micBtn.querySelector("span").textContent = "结束连麦";
-      cohostBadge.style.display = "flex";
-    }
-  }
-
-  // ── Viewer: broadcaster rejected ──
-  function onMicRejected() {
-    micBtn.classList.remove("oc-mic-pending");
-    micBtn.querySelector("span").textContent = "连麦";
-    appendChatMessage("系统", "主播拒绝了连麦请求", "#999");
-  }
-
-  // ── Viewer: handle answer from broadcaster ──
-  async function handleMicAnswer(sdp) {
-    if (!micPc) return;
-    await micPc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp }));
-  }
-
-  // ── Broadcaster: show mic request popup ──
-  function showMicRequestPopup(viewerId) {
-    const existing = document.querySelector(".oc-mic-request-popup");
-    if (existing) existing.remove();
-
-    if (isCohostActive) {
-      sendSignal({ type: "mic-reject", viewerId });
-      return;
-    }
-
-    if (isAssistMode) {
-      cohostViewerId = viewerId;
-      sendSignal({ type: "mic-accept", viewerId: viewerId });
-      isCohostActive = true;
-      return;
-    }
-
-    if (overlay.classList.contains("oc-bubble")) {
-      exitBubbleMode();
-    }
-
-    const popup = document.createElement("div");
-    popup.className = "oc-mic-request-popup";
-    popup.innerHTML =
-      '<div class="oc-mic-request-title">🎤 连麦请求</div>' +
-      '<div class="oc-mic-request-sub">观众 ' + viewerId + ' 请求连麦</div>' +
-      '<div class="oc-mic-request-actions">' +
-        '<button class="oc-mic-accept" id="oc-mic-popup-accept">同意</button>' +
-        '<button class="oc-mic-decline" id="oc-mic-popup-decline">拒绝</button>' +
-      '</div>';
-    overlay.appendChild(popup);
-
-    var autoRejectTimer = setTimeout(function () {
-      popup.remove();
-      sendSignal({ type: "mic-reject", viewerId: viewerId });
-    }, 15000);
-
-    popup.querySelector("#oc-mic-popup-accept").addEventListener("click", function () {
-      clearTimeout(autoRejectTimer);
-      popup.remove();
-      cohostViewerId = viewerId;
-      sendSignal({ type: "mic-accept", viewerId: viewerId });
-      cohostBadge.style.display = "flex";
-      isCohostActive = true;
     });
 
-    popup.querySelector("#oc-mic-popup-decline").addEventListener("click", function () {
-      clearTimeout(autoRejectTimer);
-      popup.remove();
-      sendSignal({ type: "mic-reject", viewerId: viewerId });
-    });
-  }
-
-  // ── Broadcaster: handle viewer's mic offer ──
-  async function handleMicOffer(viewerId, sdp) {
-    if (micPc) { micPc.close(); micPc = null; }
-
-    micPc = new RTCPeerConnection({ iceServers: getIceServers() });
-
-    micPc.onicecandidate = (e) => {
-      if (e.candidate) sendSignal({ type: "mic-ice", viewerId: viewerId, candidate: e.candidate });
-    };
-
-    micPc.ontrack = (e) => {
-      var audio = document.createElement("audio");
-      audio.id = "oc-cohost-audio";
-      audio.srcObject = e.streams[0];
-      audio.autoplay = true;
-      document.body.appendChild(audio);
-    };
-
-    micPc.onconnectionstatechange = () => {
-      if (micPc && (micPc.connectionState === "failed" || micPc.connectionState === "disconnected")) {
-        stopCohost();
+    agoraClient.on("user-unpublished", function (user, mediaType) {
+      if (mediaType === "video") {
+        videoContainer.innerHTML = "";
+        videoContainer.style.display = "none";
+        isSharing = false;
+        updateUI();
+        waitingState.querySelector("span").textContent = "对方已停止共享屏幕";
+        waitingState.style.display = "flex";
       }
-    };
+    });
 
-    await micPc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp }));
-    var answer = await micPc.createAnswer();
-    await micPc.setLocalDescription(answer);
-    sendSignal({ type: "mic-answer", viewerId: viewerId, sdp: answer.sdp });
+    agoraClient.on("user-left", function () {
+      videoContainer.innerHTML = "";
+      videoContainer.style.display = "none";
+      isSharing = false;
+      updateUI();
+      waitingState.querySelector("span").textContent = "协助会话已结束";
+      waitingState.style.display = "flex";
+      appendChat("系统", "对方已离开");
+    });
+
+    await agoraClient.join(agoraCredentials.appId, agoraCredentials.channel, agoraCredentials.token, null);
+    role = "helper";
+    updateUI();
   }
 
-  // ── Both: remote side stopped ──
-  function onMicStopped(viewerId) {
-    cleanupCohost();
-    appendChatMessage("系统", viewerId ? "观众 " + viewerId + " 结束了连麦" : "主播结束了连麦", "#999");
-  }
+  // ══════════════════════════════════
+  //  Microphone toggle (both sides)
+  // ══════════════════════════════════
 
-  // ── Both: actively stop cohost ──
-  function stopCohost() {
-    if (role === "broadcaster" && cohostViewerId) {
-      sendSignal({ type: "mic-stop", viewerId: cohostViewerId });
-    } else if (role === "viewer") {
-      sendSignal({ type: "mic-stop" });
+  var MIC_ON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  var MIC_OFF_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .76-.13 1.49-.35 2.17"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+
+  async function toggleMic() {
+    if (!agoraClient) return;
+
+    if (isMicOn && localMicTrack) {
+      await agoraClient.unpublish(localMicTrack);
+      localMicTrack.close();
+      localMicTrack = null;
+      isMicOn = false;
+      micBtn.innerHTML = MIC_ON_SVG;
+      micBtn.classList.remove("oc-active");
+      micBtn.classList.remove("oc-mic-off");
+      micBtn.title = "开启麦克风";
+      appendChat("系统", "麦克风已关闭");
+    } else {
+      try {
+        var AgoraRTC = await agoraReady;
+        localMicTrack = await AgoraRTC.createMicrophoneAudioTrack();
+        await agoraClient.publish(localMicTrack);
+        isMicOn = true;
+        micBtn.innerHTML = MIC_ON_SVG;
+        micBtn.classList.add("oc-active");
+        micBtn.classList.remove("oc-mic-off");
+        micBtn.title = "关闭麦克风";
+        appendChat("系统", "麦克风已开启");
+      } catch (err) {
+        micBtn.innerHTML = MIC_OFF_SVG;
+        micBtn.classList.add("oc-mic-off");
+        micBtn.classList.remove("oc-active");
+        appendChat("系统", "麦克风打开失败: " + err.message);
+      }
     }
-    cleanupCohost();
-  }
-
-  function cleanupCohost() {
-    if (micPc) { micPc.close(); micPc = null; }
-    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
-    var cohostAudio = document.getElementById("oc-cohost-audio");
-    if (cohostAudio) cohostAudio.remove();
-    isCohostActive = false;
-    cohostViewerId = null;
-    cohostBadge.style.display = "none";
-    micBtn.classList.remove("oc-mic-active", "oc-mic-pending");
-    micBtn.querySelector("span").textContent = "连麦";
-    var popup = document.querySelector(".oc-mic-request-popup");
-    if (popup) popup.remove();
   }
 
   // ══════════════════════════════════
-  //  Assist Session Logic
+  //  Session Logic (REST API)
   // ══════════════════════════════════
 
-  async function startAssistSession() {
-    const base = getSignalBase();
+  async function createSession() {
+    var base = getApiBase();
     try {
-      const res = await fetch(`${base}/live/api/assist/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const data = await res.json();
+      var res = await fetch(base + "/live/api/assist/create", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      var data = await res.json();
       if (!data.ok) { alert("创建协助会话失败"); return; }
-      assistSessionData = data.session;
-      isAssistMode = true;
-
-      modeSelect.style.display = "none";
-      assistPanel.style.display = "flex";
-      assistCode.textContent = data.session.code;
-      assistLink.value = data.joinUrl;
-
+      sessionData = data.session;
+      agoraCredentials = data.agora || null;
+      placeholder.style.display = "none";
+      sessionPanel.style.display = "flex";
+      sessionCode.textContent = data.session.code;
+      sessionLink.value = data.joinUrl;
       titleEl.textContent = "远程协助";
-      dot.className = "oc-live-dot oc-live-on";
-      dot.style.background = "var(--oc-accent-assist)";
-      dot.style.boxShadow = "0 0 8px var(--oc-accent-assist)";
+      dot.className = "oc-dot oc-on";
     } catch (err) {
       alert("创建协助会话失败: " + err.message);
     }
   }
 
-  function copyAssistLink() {
-    const link = assistLink.value;
-    if (!link) return;
-    navigator.clipboard.writeText(link).then(() => {
-      assistCopyBtn.textContent = "已复制";
-      assistCopyBtn.classList.add("oc-copied");
-      setTimeout(() => { assistCopyBtn.textContent = "复制链接"; assistCopyBtn.classList.remove("oc-copied"); }, 2000);
-    }).catch(() => {
-      assistLink.select();
-      document.execCommand("copy");
-      assistCopyBtn.textContent = "已复制";
-      assistCopyBtn.classList.add("oc-copied");
-      setTimeout(() => { assistCopyBtn.textContent = "复制链接"; assistCopyBtn.classList.remove("oc-copied"); }, 2000);
-    });
-  }
-
-  async function startAssistScreenShare() {
-    if (!checkSecureContext()) return;
+  async function shareScreen() {
+    if (!sessionData) return;
     try {
-      localStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "always" }, audio: true });
-      localStream.getVideoTracks()[0].addEventListener("ended", () => endAssistSession());
-
-      try {
-        var hostMic = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        hostMic.getAudioTracks().forEach(function (t) { localStream.addTrack(t); });
-      } catch (micErr) {
-        console.warn("[oc-live] Assist: could not get host mic, continuing without voice:", micErr.message);
-      }
-
-      video.srcObject = localStream;
-      video.play().catch(() => {});
-      isLive = true;
-      role = "broadcaster";
-      startedAt = Date.now();
-      statRole.textContent = "🛠 协助中";
-      connectSignal("broadcaster");
-
-      assistPanel.style.display = "none";
-      placeholder.style.display = "none";
-      video.style.display = "block";
-      endBtn.textContent = "结束会话";
-      endBtn.style.display = "block";
-      stopBtn.style.display = "block";
-      stopBtn.textContent = "结束会话";
-      assistBadge.style.display = "flex";
-      assistBadgeText.textContent = assistSessionData?.code || "协助中";
-      bubbleBtn.style.display = "flex";
-      startDurationTimer();
+      await agoraShareScreen();
     } catch (err) {
       if (err.name !== "AbortError" && err.name !== "NotAllowedError") {
         alert("屏幕共享失败: " + err.message);
@@ -1593,320 +612,237 @@
     }
   }
 
-  async function endAssistSession() {
-    const base = getSignalBase();
-    try { await fetch(`${base}/live/api/assist/end`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch {}
-    assistSessionData = null;
-    isAssistMode = false;
-    assistPanel.style.display = "none";
-    assistBadge.style.display = "none";
-    dot.style.background = "";
-    dot.style.boxShadow = "";
-    stopBtn.textContent = "关播";
-    stopLive();
+  async function endSession() {
+    var base = getApiBase();
+    try { await fetch(base + "/live/api/assist/end", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch {}
+
+    if (localScreenTrack) { localScreenTrack.close(); localScreenTrack = null; }
+    if (localAudioTrack) { localAudioTrack.close(); localAudioTrack = null; }
+    if (localMicTrack) { localMicTrack.close(); localMicTrack = null; }
+    isMicOn = false;
+    if (agoraClient) {
+      try { await agoraClient.leave(); } catch {}
+      agoraClient = null;
+    }
+
+    videoContainer.innerHTML = "";
+    videoContainer.style.display = "none";
+    isSharing = false;
+    startedAt = null;
+    role = null;
+    sessionData = null;
+    agoraCredentials = null;
+    if (durationTimer) clearInterval(durationTimer);
+    sessionPanel.style.display = "none";
+    waitingState.style.display = "none";
+    placeholder.style.display = "flex";
+    updateUI();
   }
 
-  async function joinAssistByCode(code) {
-    const base = getSignalBase();
+  async function joinByCode(code) {
+    var base = getApiBase();
     try {
-      const res = await fetch(`${base}/live/api/assist/join`, {
+      var res = await fetch(base + "/live/api/assist/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: code.toUpperCase() }),
       });
-      const data = await res.json();
-      if (!data.ok) {
-        assistJoinError.style.display = "block";
-        return;
-      }
-      assistJoinError.style.display = "none";
-      assistJoinPanel.style.display = "none";
-      isAssistMode = true;
-      assistSessionData = data.session;
-
+      var data = await res.json();
+      if (!data.ok) { joinError.style.display = "block"; return; }
+      joinError.style.display = "none";
+      sessionData = data.session;
+      agoraCredentials = data.agora || null;
       titleEl.textContent = "远程协助";
-      modeSelect.style.display = "none";
-      viewerWaiting.innerHTML = '<div class="oc-spinner"></div><span style="color:var(--oc-text-2);font-size:12px;font-weight:500;">正在连接协助者画面</span>';
-      viewerWaiting.style.display = "flex";
-      connectSignal("viewer");
+      placeholder.style.display = "none";
+      waitingState.querySelector("span").textContent = "正在连接…";
+      waitingState.style.display = "flex";
+
+      await agoraJoinAsViewer();
     } catch (err) {
-      assistJoinError.textContent = "连接失败: " + err.message;
-      assistJoinError.style.display = "block";
+      joinError.textContent = "连接失败: " + err.message;
+      joinError.style.display = "block";
     }
   }
 
-  function checkAssistCodeInUrl() {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("assist");
-    if (code && code.length >= 4) {
-      return code.toUpperCase();
+  // ── UI ──
+
+  function updateUI() {
+    var inSession = isSharing || (agoraClient && role);
+    dot.className = "oc-dot" + (isSharing ? " oc-on" : "");
+    badge.style.display = isSharing ? "flex" : "none";
+    endOverlayBtn.style.display = isSharing ? "block" : "none";
+    endOverlayBtn.textContent = role === "host" ? "结束会话" : "离开";
+    mediaBar.style.display = inSession ? "flex" : "none";
+    if (!inSession) {
+      micBtn.innerHTML = MIC_ON_SVG;
+      micBtn.classList.remove("oc-active", "oc-mic-off");
+      micBtn.title = "开启麦克风";
     }
-    return null;
+    if (isSharing) {
+      startDurationTimer();
+    } else {
+      titleEl.textContent = "远程协助";
+      if (durationTimer) clearInterval(durationTimer);
+    }
+  }
+
+  function startDurationTimer() {
+    if (durationTimer) clearInterval(durationTimer);
+    var tick = function () {
+      if (!startedAt) return;
+      var s = Math.floor((Date.now() - startedAt) / 1000);
+      var m = String(Math.floor(s / 60)).padStart(2, "0");
+      var sec = String(s % 60).padStart(2, "0");
+      badgeText.textContent = "协助中 " + m + ":" + sec;
+    };
+    tick();
+    durationTimer = setInterval(tick, 1000);
+  }
+
+  // ── Chat ──
+
+  var AVATAR_COLORS = ["#0097a7","#1976d2","#2e7d32","#f57c00","#7b1fa2","#00838f","#c62828","#283593","#558b2f","#4e342e"];
+  function avatarColor(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+  }
+
+  function appendChat(sender, text) {
+    if (chatEmpty.style.display !== "none") chatEmpty.style.display = "none";
+    var item = document.createElement("div");
+    item.className = "oc-chat-item";
+    var initial = (sender || "?")[0].toUpperCase();
+    var bg = avatarColor(sender || "?");
+    var now = new Date();
+    var ts = String(now.getHours()).padStart(2,"0") + ":" + String(now.getMinutes()).padStart(2,"0");
+    item.innerHTML =
+      '<div class="oc-chat-avatar" style="background:' + bg + '">' + initial + '</div>' +
+      '<div class="oc-chat-body">' +
+        '<div class="oc-chat-meta"><span class="oc-chat-sender">' + (sender || "匿名") + '</span><span class="oc-chat-time">' + ts + '</span></div>' +
+        '<div class="oc-chat-text">' + text.replace(/</g,"&lt;").replace(/>/g,"&gt;") + '</div>' +
+      '</div>';
+    chatList.appendChild(item);
+    while (chatList.children.length > 101) chatList.removeChild(chatList.children[1]);
+    chatList.scrollTop = chatList.scrollHeight;
+  }
+
+  function sendChat() {
+    var text = chatInput.value.trim();
+    if (!text) return;
+    var sender = role === "host" ? "主机" : "协助者";
+    appendChat(sender, text);
+    fetch(getApiBase() + "/live/api/chat/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text, sender: sender }),
+    }).catch(function () {});
+    chatInput.value = "";
+  }
+
+  function connectChatSSE() {
+    var es = new EventSource(getApiBase() + "/live/api/events");
+    es.addEventListener("chat", function (e) {
+      try {
+        var msg = JSON.parse(e.data);
+        var mySender = role === "host" ? "主机" : "协助者";
+        if (msg.sender !== mySender) appendChat(msg.sender, msg.text);
+      } catch {}
+    });
   }
 
   // ── Event Listeners ──
 
-  $("oc-btn-assist").addEventListener("click", startAssistSession);
-  $("oc-assist-copy").addEventListener("click", copyAssistLink);
-  $("oc-assist-share-screen").addEventListener("click", startAssistScreenShare);
-  $("oc-assist-end").addEventListener("click", endAssistSession);
-  $("oc-assist-join-btn").addEventListener("click", () => {
-    const code = assistJoinCodeInput.value.trim();
-    if (code.length >= 4) joinAssistByCode(code);
+  $("oc-btn-start").addEventListener("click", createSession);
+  $("oc-btn-share-screen").addEventListener("click", shareScreen);
+  $("oc-btn-end-session").addEventListener("click", endSession);
+  endOverlayBtn.addEventListener("click", endSession);
+  micBtn.addEventListener("click", toggleMic);
+
+  $("oc-btn-join").addEventListener("click", function () {
+    var code = joinCodeInput.value.trim();
+    if (code.length >= 4) joinByCode(code);
   });
-  assistJoinCodeInput.addEventListener("keydown", (e) => {
+  joinCodeInput.addEventListener("keydown", function (e) {
     e.stopPropagation();
-    if (e.key === "Enter") {
-      const code = assistJoinCodeInput.value.trim();
-      if (code.length >= 4) joinAssistByCode(code);
-    }
+    if (e.key === "Enter") { var code = joinCodeInput.value.trim(); if (code.length >= 4) joinByCode(code); }
   });
-  assistJoinCodeInput.addEventListener("keyup", (e) => e.stopPropagation());
-  assistJoinCodeInput.addEventListener("keypress", (e) => e.stopPropagation());
+  joinCodeInput.addEventListener("keyup", function (e) { e.stopPropagation(); });
 
-  $("oc-btn-camera").addEventListener("click", startCamera);
-  $("oc-btn-screen").addEventListener("click", startScreen);
-  $("oc-btn-viewer").addEventListener("click", () => {
-    modeSelect.style.display = "none";
-    viewerWaiting.style.display = "flex";
-    connectSignal("viewer");
-  });
-  const SVG_VOL_ON  = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
-  const SVG_VOL_OFF = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
-
-  function syncAudioBtn() {
-    if (video.muted) {
-      audioUnlockBtn.innerHTML = SVG_VOL_OFF;
-      audioUnlockBtn.title = "已静音，点击开启音频";
-    } else {
-      audioUnlockBtn.innerHTML = SVG_VOL_ON;
-      audioUnlockBtn.title = "点击静音";
-    }
-  }
-
-  audioUnlockBtn.addEventListener("click", () => {
-    video.muted = !video.muted;
-    if (!video.muted) video.play().catch(() => {});
-    syncAudioBtn();
-  });
-
-  micBtn.addEventListener("click", requestMic);
-
-  stopBtn.addEventListener("click", () => { if (isAssistMode) endAssistSession(); else stopLive(); });
-  endBtn.addEventListener("click", () => { if (isAssistMode) endAssistSession(); else stopLive(); });
-
-  $("oc-chat-header").addEventListener("click", () => chatPanel.classList.toggle("oc-chat-collapsed"));
-
-  bubbleBtn.addEventListener("click", () => { if (isLive) enterBubbleMode(); });
-  $("oc-btn-min").addEventListener("click", () => overlay.classList.toggle("oc-minimized"));
-  $("oc-btn-fs").addEventListener("click", () => overlay.classList.toggle("oc-fullscreen"));
-  $("oc-btn-close").addEventListener("click", () => {
-    overlay.classList.add("oc-hidden");
-    toggleBtn.classList.add("oc-visible");
-  });
-  let _fabDragged = false;
-  toggleBtn.addEventListener("click", () => {
-    if (_fabDragged) { _fabDragged = false; return; }
-    overlay.classList.remove("oc-hidden");
-    toggleBtn.classList.remove("oc-visible");
-    if (isLive) enterBubbleMode();
-  });
-
-  // ── Bubble Mode: click to expand, click again to collapse, drag to move ──
-
-  (function () {
-    let dragging = false, moved = false, sx, sy, sl, st;
-    const THRESHOLD = 5;
-
-    function startBubbleDrag(cx, cy, e) {
-      if (!overlay.classList.contains("oc-bubble")) return;
-      dragging = true; moved = false;
-      const r = overlay.getBoundingClientRect();
-      sx = cx; sy = cy; sl = r.left; st = r.top;
-      overlay.style.transition = "none";
-      e.preventDefault();
-    }
-    function moveBubbleDrag(cx, cy) {
-      if (!dragging) return;
-      const dx = cx - sx, dy = cy - sy;
-      if (!moved && Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
-      moved = true;
-      overlay.style.left = `${sl + dx}px`;
-      overlay.style.top = `${st + dy}px`;
-      overlay.style.right = "auto";
-      overlay.style.bottom = "auto";
-    }
-    function endBubbleDrag() {
-      if (!dragging) return;
-      dragging = false;
-      overlay.style.transition = "";
-      if (!moved) exitBubbleMode();
-    }
-
-    overlay.addEventListener("mousedown", (e) => startBubbleDrag(e.clientX, e.clientY, e));
-    document.addEventListener("mousemove", (e) => moveBubbleDrag(e.clientX, e.clientY));
-    document.addEventListener("mouseup", endBubbleDrag);
-
-    overlay.addEventListener("touchstart", (e) => {
-      if (!overlay.classList.contains("oc-bubble")) return;
-      const t = e.touches[0]; startBubbleDrag(t.clientX, t.clientY, e);
-    }, { passive: false });
-    document.addEventListener("touchmove", (e) => {
-      if (!dragging) return;
-      const t = e.touches[0]; moveBubbleDrag(t.clientX, t.clientY); e.preventDefault();
-    }, { passive: false });
-    document.addEventListener("touchend", endBubbleDrag);
-  })();
-
-  $("oc-dm-send").addEventListener("click", sendDanmaku);
-  dmInput.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") sendDanmaku(); });
-  dmInput.addEventListener("keyup", (e) => e.stopPropagation());
-  dmInput.addEventListener("keypress", (e) => e.stopPropagation());
-
-  // ── Drag (mouse + touch) ──
-
-  (function () {
-    const handle = $("oc-drag-handle");
-    let dragging = false, sx, sy, sl, st;
-    function startDrag(cx, cy, e) {
-      if (e.target.closest(".oc-live-btn,.oc-live-controls")) return;
-      dragging = true;
-      const r = overlay.getBoundingClientRect();
-      sx = cx; sy = cy; sl = r.left; st = r.top;
-      overlay.style.transition = "none";
-      e.preventDefault();
-    }
-    function moveDrag(cx, cy) {
-      if (!dragging) return;
-      overlay.style.left = `${sl + cx - sx}px`;
-      overlay.style.top = `${st + cy - sy}px`;
-      overlay.style.right = "auto"; overlay.style.bottom = "auto";
-    }
-    function endDrag() { if (dragging) { dragging = false; overlay.style.transition = ""; } }
-
-    handle.addEventListener("mousedown", (e) => startDrag(e.clientX, e.clientY, e));
-    document.addEventListener("mousemove", (e) => moveDrag(e.clientX, e.clientY));
-    document.addEventListener("mouseup", endDrag);
-
-    handle.addEventListener("touchstart", (e) => { const t = e.touches[0]; startDrag(t.clientX, t.clientY, e); }, { passive: false });
-    document.addEventListener("touchmove", (e) => { if (!dragging) return; const t = e.touches[0]; moveDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
-    document.addEventListener("touchend", endDrag);
-  })();
-
-  // ── FAB Drag (mouse + touch) ──
-
-  (function () {
-    let dragging = false, moved = false, sx, sy, sl, st;
-    const THRESHOLD = 4;
-
-    function startFabDrag(cx, cy, e) {
-      dragging = true; moved = false;
-      const r = toggleBtn.getBoundingClientRect();
-      sx = cx; sy = cy; sl = r.left; st = r.top;
-      e.preventDefault();
-    }
-    function moveFabDrag(cx, cy) {
-      if (!dragging) return;
-      const dx = cx - sx, dy = cy - sy;
-      if (!moved && Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
-      moved = true;
-      toggleBtn.classList.add("oc-dragging");
-      toggleBtn.style.left = `${sl + dx}px`;
-      toggleBtn.style.top = `${st + dy}px`;
-      toggleBtn.style.right = "auto";
-      toggleBtn.style.bottom = "auto";
-    }
-    function endFabDrag() {
-      if (!dragging) return;
-      dragging = false;
-      toggleBtn.classList.remove("oc-dragging");
-    }
-
-    toggleBtn.addEventListener("mousedown", (e) => startFabDrag(e.clientX, e.clientY, e));
-    document.addEventListener("mousemove", (e) => moveFabDrag(e.clientX, e.clientY));
-    document.addEventListener("mouseup", () => {
-      if (dragging && moved) _fabDragged = true;
-      endFabDrag();
+  $("oc-copy-link").addEventListener("click", function () {
+    var link = sessionLink.value;
+    if (!link) return;
+    var btn = $("oc-copy-link");
+    navigator.clipboard.writeText(link).then(function () {
+      btn.textContent = "已复制"; btn.classList.add("oc-copied");
+      setTimeout(function () { btn.textContent = "复制链接"; btn.classList.remove("oc-copied"); }, 2000);
+    }).catch(function () {
+      sessionLink.select(); document.execCommand("copy");
+      btn.textContent = "已复制"; btn.classList.add("oc-copied");
+      setTimeout(function () { btn.textContent = "复制链接"; btn.classList.remove("oc-copied"); }, 2000);
     });
+  });
 
-    toggleBtn.addEventListener("touchstart", (e) => { const t = e.touches[0]; startFabDrag(t.clientX, t.clientY, e); }, { passive: false });
-    document.addEventListener("touchmove", (e) => { if (!dragging) return; const t = e.touches[0]; moveFabDrag(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
-    document.addEventListener("touchend", () => {
-      if (dragging && moved) _fabDragged = true;
-      endFabDrag();
-    });
-  })();
+  $("oc-chat-send").addEventListener("click", sendChat);
+  chatInput.addEventListener("keydown", function (e) { e.stopPropagation(); if (e.key === "Enter") sendChat(); });
+  chatInput.addEventListener("keyup", function (e) { e.stopPropagation(); });
+  $("oc-chat-header").addEventListener("click", function () { chatPanel.classList.toggle("oc-collapsed"); });
 
-  // ── Resize (mouse + touch) ──
+  $("oc-btn-settings").addEventListener("click", function () {
+    settingsPanel.style.display = settingsPanel.style.display === "flex" ? "none" : "flex";
+  });
+  $("oc-cfg-cancel").addEventListener("click", function () {
+    settingsPanel.style.display = "none";
+  });
 
+  $("oc-btn-min").addEventListener("click", function () { overlay.classList.toggle("oc-minimized"); });
+  $("oc-btn-fs").addEventListener("click", function () { overlay.classList.toggle("oc-fullscreen"); });
+  $("oc-btn-close").addEventListener("click", function () {
+    overlay.classList.add("oc-hidden"); toggleBtn.classList.add("oc-visible");
+  });
+  toggleBtn.addEventListener("click", function () {
+    overlay.classList.remove("oc-hidden"); toggleBtn.classList.remove("oc-visible");
+  });
+
+  // ── Drag ──
   (function () {
-    const handle = $("oc-resize");
-    let resizing = false, sx, sy, sw, sh, sl, st;
-    function startResize(cx, cy, e) {
-      resizing = true;
-      const r = overlay.getBoundingClientRect();
-      sx = cx; sy = cy; sw = r.width; sh = r.height; sl = r.left; st = r.top;
-      overlay.style.transition = "none";
-      e.preventDefault();
+    var handle = $("oc-drag"), dragging = false, sx, sy, sl, st;
+    function start(cx, cy, e) {
+      if (e.target.closest(".oc-btn,.oc-controls")) return;
+      dragging = true; var r = overlay.getBoundingClientRect();
+      sx = cx; sy = cy; sl = r.left; st = r.top;
+      overlay.style.transition = "none"; e.preventDefault();
     }
-    function moveResize(cx, cy) {
-      if (!resizing) return;
-      const nw = Math.max(300, sw - (cx - sx));
-      const nh = Math.max(380, sh - (cy - sy));
-      overlay.style.width = `${nw}px`; overlay.style.height = `${nh}px`;
-      overlay.style.left = `${sl + (sw - nw)}px`; overlay.style.top = `${st + (sh - nh)}px`;
-      overlay.style.right = "auto"; overlay.style.bottom = "auto";
-    }
-    function endResize() { if (resizing) { resizing = false; overlay.style.transition = ""; } }
-
-    handle.addEventListener("mousedown", (e) => startResize(e.clientX, e.clientY, e));
-    document.addEventListener("mousemove", (e) => moveResize(e.clientX, e.clientY));
-    document.addEventListener("mouseup", endResize);
-
-    handle.addEventListener("touchstart", (e) => { const t = e.touches[0]; startResize(t.clientX, t.clientY, e); }, { passive: false });
-    document.addEventListener("touchmove", (e) => { if (!resizing) return; const t = e.touches[0]; moveResize(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
-    document.addEventListener("touchend", endResize);
+    function move(cx, cy) { if (!dragging) return; overlay.style.left = (sl + cx - sx) + "px"; overlay.style.top = (st + cy - sy) + "px"; overlay.style.right = "auto"; overlay.style.bottom = "auto"; }
+    function end() { if (dragging) { dragging = false; overlay.style.transition = ""; } }
+    handle.addEventListener("mousedown", function (e) { start(e.clientX, e.clientY, e); });
+    document.addEventListener("mousemove", function (e) { move(e.clientX, e.clientY); });
+    document.addEventListener("mouseup", end);
+    handle.addEventListener("touchstart", function (e) { var t = e.touches[0]; start(t.clientX, t.clientY, e); }, { passive: false });
+    document.addEventListener("touchmove", function (e) { if (!dragging) return; var t = e.touches[0]; move(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
+    document.addEventListener("touchend", end);
   })();
 
-  // ── Auto-detect: localStorage openclaw.device.auth.v1 → host or viewer ──
+  // ── Resize ──
+  (function () {
+    var handle = $("oc-resize"), resizing = false, sx, sy, sw, sh, sl, st;
+    function start(cx, cy, e) { resizing = true; var r = overlay.getBoundingClientRect(); sx = cx; sy = cy; sw = r.width; sh = r.height; sl = r.left; st = r.top; overlay.style.transition = "none"; e.preventDefault(); }
+    function move(cx, cy) { if (!resizing) return; var nw = Math.max(300, sw - (cx - sx)), nh = Math.max(400, sh - (cy - sy)); overlay.style.width = nw + "px"; overlay.style.height = nh + "px"; overlay.style.left = (sl + (sw - nw)) + "px"; overlay.style.top = (st + (sh - nh)) + "px"; overlay.style.right = "auto"; overlay.style.bottom = "auto"; }
+    function end() { if (resizing) { resizing = false; overlay.style.transition = ""; } }
+    handle.addEventListener("mousedown", function (e) { start(e.clientX, e.clientY, e); });
+    document.addEventListener("mousemove", function (e) { move(e.clientX, e.clientY); });
+    document.addEventListener("mouseup", end);
+  })();
 
-  (async function autoDetect() {
-    const base = getSignalBase();
-
-    var assistCode = checkAssistCodeInUrl();
-    if (assistCode) {
-      modeSelect.style.display = "none";
-      placeholder.style.display = "flex";
-      joinAssistByCode(assistCode);
-      return;
-    }
-
-    var broadcasting = false;
-    try {
-      var stRes = await fetch(base + "/live/api/state");
-      var stData = await stRes.json();
-      broadcasting = stData.broadcasting === true;
-    } catch (e) {}
-
-    if (broadcasting) {
-      modeSelect.style.display = "none";
-      viewerWaiting.style.display = "flex";
-      connectSignal("viewer");
-      return;
-    }
-
+  // ── Auto-detect: join by URL param ──
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var code = params.get("assist");
+    if (code && code.length >= 4) { joinByCode(code.toUpperCase()); return; }
     var isHost = !!localStorage.getItem("openclaw.device.auth.v1");
-    console.log("[oc-live] isHost:", isHost, "(openclaw.device.auth.v1", isHost ? "found" : "missing", ")");
-
-    if (isHost) {
-      $("oc-mode-label").style.display = "none";
-      $("oc-host-actions").style.display = "flex";
-      // settings button hidden
-    } else {
-      modeSelect.style.display = "none";
-      viewerWaiting.style.display = "flex";
-      connectSignal("viewer");
-    }
+    if (!isHost) { overlay.classList.add("oc-hidden"); toggleBtn.classList.add("oc-visible"); }
   })();
+
+  connectChatSSE();
 
 })();

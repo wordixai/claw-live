@@ -1,11 +1,9 @@
-import { StreamService } from "./stream-service.js";
-import { SignalingService } from "./signaling-service.js";
-import { StreamControlRequest } from "./types.js";
+import { AssistService } from "./assist-service.js";
+import { AgoraTokenService } from "./agora-token-service.js";
 import * as fs from "fs";
 import * as path from "path";
-import { exec } from "child_process";
 
-export function createApiHandler(stream: StreamService, signaling: SignalingService) {
+export function createApiHandler(assist: AssistService, agora: AgoraTokenService) {
   const overlayDir = path.resolve(__dirname, "..", "overlay");
 
   const handler = async (req: any, res: any) => {
@@ -30,87 +28,70 @@ export function createApiHandler(stream: StreamService, signaling: SignalingServ
       return serveFile(res, path.join(overlayDir, "live-stream-overlay.css"), "text/css");
     }
 
-    // --- Signaling SSE: client connects here to receive messages ---
-    if (pathname === "/live/signal/events") {
-      const role = url.searchParams.get("role") || "viewer";
-      signaling.handleSseConnect(res, role);
-      return;
-    }
-
-    // --- Signaling POST: client sends messages here ---
-    if (pathname === "/live/signal/send" && req.method === "POST") {
-      const body = await readBody(req);
-      const { clientId, ...msg } = body as { clientId: string } & Record<string, unknown>;
-      if (!clientId) {
-        return json(res, { ok: false, message: "clientId is required" }, 400);
-      }
-      signaling.handleMessage(clientId, msg);
-      return json(res, { ok: true });
-    }
-
-    // --- Stream control API ---
-    if (pathname === "/live/api/control" && req.method === "POST") {
-      return handleControl(req, res, stream);
-    }
-
-    // --- Auth check: execute `openclaw health` to verify device authorization ---
-    if (pathname === "/live/api/auth-check") {
-      const port = String(req.socket?.localPort || process.env.PORT || "3000");
-      const result = await checkGatewayHealth(port);
-      return json(res, result);
-    }
-
-    // --- Stream state (GET) ---
-    if (pathname === "/live/api/state") {
-      return json(res, { ok: true, state: stream.getState(), broadcasting: signaling.hasBroadcaster() });
-    }
-
-    // --- Danmaku history ---
-    if (pathname === "/live/api/danmaku") {
-      const limit = parseInt(url.searchParams.get("limit") || "50", 10);
-      return json(res, { ok: true, messages: stream.getDanmakuHistory(limit) });
-    }
-
-    // --- Send danmaku ---
-    if (pathname === "/live/api/danmaku/send" && req.method === "POST") {
-      return handleSendDanmaku(req, res, stream);
-    }
-
-    // --- SSE: real-time state + danmaku ---
-    if (pathname === "/live/api/events") {
-      return handleSSE(req, res, stream);
-    }
-
-    // --- Assist session: create ---
+    // --- Assist: create session ---
     if (pathname === "/live/api/assist/create" && req.method === "POST") {
-      const session = stream.createAssistSession();
+      const session = assist.createSession();
       const host = req.headers.host || "localhost";
       const proto = req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http");
       const joinUrl = `${proto}://${host}?assist=${session.code}`;
-      return json(res, { ok: true, session, joinUrl });
+      return json(res, {
+        ok: true,
+        session,
+        joinUrl,
+        agora: agora.isConfigured
+          ? { appId: agora.getAppId(), token: agora.generateToken(session.code), channel: session.code }
+          : null,
+      });
     }
 
-    // --- Assist session: join by code ---
+    // --- Assist: join by code ---
     if (pathname === "/live/api/assist/join" && req.method === "POST") {
       const body = await readBody(req);
       const { code } = body as { code: string };
       if (!code) return json(res, { ok: false, message: "code is required" }, 400);
-      const session = stream.joinAssistSession(code.toUpperCase());
+      const normalizedCode = code.toUpperCase();
+      const session = assist.joinSession(normalizedCode);
       if (!session) return json(res, { ok: false, message: "Invalid or expired session code" }, 404);
-      return json(res, { ok: true, session });
+      return json(res, {
+        ok: true,
+        session,
+        agora: agora.isConfigured
+          ? { appId: agora.getAppId(), token: agora.generateToken(normalizedCode), channel: normalizedCode }
+          : null,
+      });
     }
 
-    // --- Assist session: end ---
+    // --- Assist: end session ---
     if (pathname === "/live/api/assist/end" && req.method === "POST") {
-      const session = stream.endAssistSession();
+      const session = assist.endSession();
       if (!session) return json(res, { ok: false, message: "No active assist session" }, 404);
       return json(res, { ok: true, session });
     }
 
-    // --- Assist session: current state ---
+    // --- Assist: current state ---
     if (pathname === "/live/api/assist/state") {
-      const session = stream.getAssistSession();
+      const session = assist.getSession();
       return json(res, { ok: true, session });
+    }
+
+    // --- Chat: send message ---
+    if (pathname === "/live/api/chat/send" && req.method === "POST") {
+      const body = await readBody(req);
+      const { text, sender } = body as { text: string; sender?: string };
+      if (!text) return json(res, { ok: false, message: "text is required" }, 400);
+      const msg = assist.pushChat(text, sender || "anonymous");
+      return json(res, { ok: true, message: msg });
+    }
+
+    // --- Chat: history ---
+    if (pathname === "/live/api/chat/history") {
+      const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+      return json(res, { ok: true, messages: assist.getChatHistory(limit) });
+    }
+
+    // --- SSE: real-time session + chat events ---
+    if (pathname === "/live/api/events") {
+      return handleSSE(req, res, assist);
     }
 
     res.writeHead(404);
@@ -120,38 +101,7 @@ export function createApiHandler(stream: StreamService, signaling: SignalingServ
   return handler;
 }
 
-async function handleControl(req: any, res: any, stream: StreamService) {
-  const body = await readBody(req);
-  const { action, streamUrl, roomTitle } = body as StreamControlRequest;
-
-  switch (action) {
-    case "start":
-      stream.start({ streamUrl, roomTitle });
-      return json(res, { ok: true, state: stream.getState(), message: "Stream started" });
-    case "stop":
-      stream.stop();
-      return json(res, { ok: true, state: stream.getState(), message: "Stream stopped" });
-    case "config":
-      stream.updateConfig({ streamUrl, roomTitle });
-      return json(res, { ok: true, state: stream.getState(), message: "Config updated" });
-    case "status":
-      return json(res, { ok: true, state: stream.getState() });
-    default:
-      return json(res, { ok: false, state: stream.getState(), message: `Unknown action: ${action}` }, 400);
-  }
-}
-
-async function handleSendDanmaku(req: any, res: any, stream: StreamService) {
-  const body = await readBody(req);
-  const { text, sender } = body as { text: string; sender?: string };
-  if (!text) {
-    return json(res, { ok: false, message: "text is required" }, 400);
-  }
-  const msg = stream.pushDanmaku(text, sender || "anonymous");
-  return json(res, { ok: true, message: msg });
-}
-
-function handleSSE(req: any, res: any, stream: StreamService) {
+function handleSSE(req: any, res: any, assist: AssistService) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -163,19 +113,19 @@ function handleSSE(req: any, res: any, stream: StreamService) {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  sendEvent("state", stream.getState());
+  sendEvent("session", assist.getSession());
 
-  const unsubState = stream.onStateChange((state) => {
-    sendEvent("state", state);
+  const unsubSession = assist.onSessionChange((session) => {
+    sendEvent("session", session);
   });
 
-  const unsubDanmaku = stream.onDanmaku((msg) => {
-    sendEvent("danmaku", msg);
+  const unsubChat = assist.onChat((msg) => {
+    sendEvent("chat", msg);
   });
 
   req.on("close", () => {
-    unsubState();
-    unsubDanmaku();
+    unsubSession();
+    unsubChat();
   });
 }
 
@@ -188,44 +138,6 @@ function serveFile(res: any, filePath: string, contentType: string) {
     res.writeHead(404);
     res.end("File not found");
   }
-}
-
-// ── Gateway health check via `openclaw health` ──
-
-let healthCache: { result: any; ts: number } | null = null;
-const HEALTH_CACHE_TTL = 60_000;
-
-function checkGatewayHealth(port: string): Promise<{ ok: boolean; isHost: boolean; gateway?: any }> {
-  if (healthCache && Date.now() - healthCache.ts < HEALTH_CACHE_TTL) {
-    return Promise.resolve(healthCache.result);
-  }
-
-  return new Promise((resolve) => {
-    const env = { ...process.env, OPENCLAW_GATEWAY_PORT: port };
-    exec("openclaw health --json --timeout 3000", { timeout: 6000, env }, (err, stdout) => {
-      if (err) {
-        const fail = { ok: false, isHost: false, error: err.message };
-        resolve(fail);
-        return;
-      }
-      try {
-        const health = JSON.parse(stdout);
-        const result = {
-          ok: true,
-          isHost: health.ok === true,
-          gateway: {
-            healthy: health.ok,
-            channels: Object.keys(health.channels || {}),
-            agents: (health.agents || []).map((a: any) => a.agentId),
-          },
-        };
-        healthCache = { result, ts: Date.now() };
-        resolve(result);
-      } catch {
-        resolve({ ok: false, isHost: false });
-      }
-    });
-  });
 }
 
 function json(res: any, data: any, status = 200) {

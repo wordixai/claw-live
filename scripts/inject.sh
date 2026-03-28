@@ -12,6 +12,8 @@ PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 OVERLAY_JS="${PLUGIN_ROOT}/overlay/live-stream-overlay.js"
 OVERLAY_CSS="${PLUGIN_ROOT}/overlay/live-stream-overlay.css"
 OVERLAY_SW="${PLUGIN_ROOT}/overlay/sw.js"
+AGORA_SDK="${PLUGIN_ROOT}/overlay/AgoraRTC_N.js"
+WS_HOOK_JS="${PLUGIN_ROOT}/overlay/ws-hook.js"
 
 # ── Auto-detect Control UI directory ──
 
@@ -85,8 +87,8 @@ fi
 
 if grep -q "live-stream-overlay" "$INDEX_HTML" 2>/dev/null; then
   echo "⚠️  Already injected. Re-injecting (updating files)..."
-  # Remove old tags so we can re-inject cleanly
-  sed -i.bak '/__ocWsOk/d; /live-stream-overlay/d' "$INDEX_HTML"
+  # Remove old tags (inline __ocWsOk, external ws-hook.js, overlay script)
+  sed -i.bak '/__ocWsOk/d; /live-stream-overlay/d; /ws-hook\.js/d' "$INDEX_HTML"
   rm -f "${INDEX_HTML}.bak"
 fi
 
@@ -96,32 +98,26 @@ echo "📦 Copying overlay files..."
 cp "$OVERLAY_JS" "${CONTROL_UI_DIR}/live-stream-overlay.js"
 cp "$OVERLAY_CSS" "${CONTROL_UI_DIR}/live-stream-overlay.css"
 cp "$OVERLAY_SW" "${CONTROL_UI_DIR}/sw.js"
-
-# ── WebSocket auth interceptor (must load BEFORE the Control UI module script) ──
-# Gateway auth is message-level: WS opens for everyone, then server sends
-# connect.challenge, client sends connect, server replies {type:"res",ok:true/false}.
-# We intercept the first non-live WS and listen for the auth success message.
-WS_HOOK='<script>(function(){var W=WebSocket,d=false;window.__ocWsOk=false;window.WebSocket=function(u,p){var s=p!==void 0?new W(u,p):new W(u);if(!d&&u&&String(u).indexOf("/live/")<0){d=true;s.addEventListener("message",function h(e){try{var m=JSON.parse(e.data);if(m.type==="res"&&m.ok===true){window.__ocWsOk=true;s.removeEventListener("message",h)}}catch(x){}})}return s};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED})()</script>'
-
-OVERLAY_TAG='<script src="./live-stream-overlay.js" defer></script>'
+cp "$AGORA_SDK" "${CONTROL_UI_DIR}/AgoraRTC_N.js"
+cp "$WS_HOOK_JS" "${CONTROL_UI_DIR}/ws-hook.js"
 
 echo "💉 Injecting into index.html..."
 
-# Use Node.js for injection to avoid sed special-character issues (& on macOS)
+# Use Node.js for injection — external scripts only (no inline, to satisfy CSP)
 node -e "
 const fs = require('fs');
 let html = fs.readFileSync(process.argv[1], 'utf-8');
-const wsHook = process.argv[2];
-const overlayTag = process.argv[3];
 
-// 1) Insert WS hook before the first <script type=\"module\">
+// 1) Insert WS hook (external .js) before the first <script type=\"module\">
+const wsTag = '<script src=\"./ws-hook.js\"></script>';
 if (html.includes('<script type=\"module\"')) {
-  html = html.replace('<script type=\"module\"', wsHook + '\n<script type=\"module\"');
+  html = html.replace('<script type=\"module\"', wsTag + '\n<script type=\"module\"');
 } else {
-  html = html.replace('<head>', '<head>\n' + wsHook);
+  html = html.replace('<head>', '<head>\n' + wsTag);
 }
 
 // 2) Insert overlay script before </body>
+const overlayTag = '<script src=\"./live-stream-overlay.js\" defer></script>';
 if (html.includes('</body>')) {
   html = html.replace('</body>', overlayTag + '\n</body>');
 } else if (html.includes('</html>')) {
@@ -131,24 +127,24 @@ if (html.includes('</body>')) {
 }
 
 fs.writeFileSync(process.argv[1], html);
-" "$INDEX_HTML" "$WS_HOOK" "$OVERLAY_TAG"
+" "$INDEX_HTML"
 
 echo ""
-echo "✅ Live stream overlay injected!"
+echo "✅ Assist overlay injected!"
 echo ""
 echo "   Control UI:  $CONTROL_UI_DIR"
 echo "   Files added:"
 echo "     - live-stream-overlay.js"
 echo "     - live-stream-overlay.css"
 echo "     - sw.js (Service Worker)"
+echo "     - AgoraRTC_N.js (Agora SDK)"
+echo "     - ws-hook.js (WS auth interceptor)"
 echo "   Script tag added to index.html"
 echo ""
 echo "   Restart the Gateway to see the overlay:"
 echo "     openclaw gateway"
 echo ""
-echo "   Control the stream:"
-echo "     /live start [hls-url]"
-echo "     /live stop"
-echo "     /live status"
-echo "     /live title <name>"
-echo "     /live dm <message>"
+echo "   Commands:"
+echo "     /assist start   — Create assist session"
+echo "     /assist stop    — End session"
+echo "     /assist         — Show status"

@@ -1,7 +1,7 @@
 {
-  "name": "openclaw-live-stream",
-  "version": "0.1.0",
-  "description": "Live stream overlay plugin for OpenClaw Control UI — floating video player with danmaku, drag/resize, and stream controls.",
+  "name": "openclaw-assist",
+  "version": "0.2.0",
+  "description": "Remote assist plugin for OpenClaw Control UI — one-click screen sharing with chat for troubleshooting and collaboration.",
   "main": "src/index.ts",
   "openclaw": {
     "extensions": [
@@ -15,15 +15,17 @@
   "keywords": [
     "openclaw",
     "plugin",
-    "live-stream",
-    "danmaku",
-    "overlay"
+    "remote-assist",
+    "screen-sharing",
+    "collaboration"
   ],
   "license": "MIT",
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "agora-token": "^2.0.5",
     "ws": "^8.19.0"
   }
 }

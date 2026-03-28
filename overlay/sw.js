@@ -1,9 +1,9 @@
 /**
- * OpenClaw Live Stream — Service Worker
+ * OpenClaw Assist — Service Worker
  *
- * Intercepts all responses from the Gateway and strips
- * restrictive security headers so that camera/mic and
- * iframe embedding work on the original port.
+ * ONLY intercepts top-level navigation responses (HTML pages)
+ * and strips restrictive CSP / security headers so that the
+ * Agora SDK can connect to its cloud servers.
  */
 
 const HEADERS_TO_REMOVE = ["x-frame-options"];
@@ -15,12 +15,9 @@ self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener("fetch", (event) => {
-  const req = event.request;
+  if (event.request.mode !== "navigate") return;
 
-  if (req.mode === "navigate" || req.destination === "document" || req.destination === "") {
-    event.respondWith(proxyAndStrip(req));
-    return;
-  }
+  event.respondWith(proxyAndStrip(event.request));
 });
 
 async function proxyAndStrip(request) {
@@ -35,11 +32,8 @@ async function proxyAndStrip(request) {
     headers.set(k, v);
   }
 
-  let csp = headers.get("content-security-policy");
-  if (csp) {
-    csp = csp.replace(/frame-ancestors\s+[^;]*(;|$)/gi, "");
-    headers.set("content-security-policy", csp);
-  }
+  headers.delete("content-security-policy");
+  headers.delete("content-security-policy-report-only");
 
   return new Response(response.body, {
     status: response.status,
