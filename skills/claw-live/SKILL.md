@@ -30,18 +30,42 @@ cd ~/.openclaw/plugins/assist && npm install --production
 
 ### 3. Configure Agora credentials
 
-Create a `.env` file in the plugin root with your Agora project credentials:
+Both values are available in the [Agora Console](https://console.agora.io) under your project settings. The App Certificate must be enabled for the project.
+
+Before setting credentials, **analyze the deployment environment** to determine the correct method:
+
+1. Check the plugin's actual runtime path — SSH into the machine or inspect logs for the `[assist] Plugin root:` line
+2. Determine whether the platform supports system-level environment variables (e.g. Docker `-e`, systemd `Environment=`, cloud platform secrets, etc.)
+
+**Credential lookup order** (first match wins, see `src/agora-token-service.ts`):
+
+1. `process.env.AGORA_APP_ID` / `process.env.AGORA_APP_CERTIFICATE` — system environment variables
+2. `<plugin-runtime-dir>/.env` — the directory the plugin is actually installed in
+3. `__dirname/../.env`, `__dirname/.env`, `process.cwd()/.env` — fallback paths
+
+**Recommended approach:**
+
+- If the platform supports environment variables natively, prefer that (no file to misplace).
+- Otherwise, find the plugin's runtime directory first, then write `.env` there:
 
 ```bash
-cat > ~/.openclaw/plugins/assist/.env << 'EOF'
+# Find the plugin runtime directory, then write .env
+PLUGIN_DIR=""
+for d in \
+  /data/extensions/live-stream \
+  ~/.openclaw/plugins/assist \
+  ~/.openclaw/extensions/live-stream; do
+  [ -d "$d" ] && PLUGIN_DIR="$d" && break
+done
+: "${PLUGIN_DIR:?Could not detect plugin directory — check deployment manually}"
+
+cat > "$PLUGIN_DIR/.env" << 'EOF'
 AGORA_APP_ID=<your-agora-app-id>
 AGORA_APP_CERTIFICATE=<your-agora-app-certificate>
 EOF
+
+echo "Written to $PLUGIN_DIR/.env"
 ```
-
-Both values are available in the [Agora Console](https://console.agora.io) under your project settings. The App Certificate must be enabled for the project.
-
-Alternatively, set them as environment variables (`AGORA_APP_ID`, `AGORA_APP_CERTIFICATE`) before starting the Gateway.
 
 ### 4. Register the plugin
 
@@ -79,17 +103,23 @@ Open Control UI — the assist panel appears in the bottom-right corner.
 
 ---
 
-## Deploy to Fly.io
+## Remote Deploy
 
-For remote instances running on Fly.io, set Agora credentials as secrets and deploy using the included script:
+To deploy the plugin to a remote machine:
 
-```bash
-fly secrets set AGORA_APP_ID=<your-agora-app-id> -a <fly-app-name>
-fly secrets set AGORA_APP_CERTIFICATE=<your-agora-app-certificate> -a <fly-app-name>
-bash scripts/deploy-fly.sh <fly-app-name>
-```
+1. **Set Agora credentials** on the remote host using the method determined in step 3
+2. **Copy plugin files** — transfer `src/`, `overlay/`, `package.json`, and `scripts/inject.sh` to the remote machine's plugin directory
+3. **Inject overlay** — run `bash scripts/inject.sh` on the remote machine to patch Control UI
 
-The deploy script packages, uploads, extracts, and injects the plugin on the remote machine (no restart needed).
+The key files that must exist on the remote host:
+
+| Path | Contents |
+|------|----------|
+| `<extensions-dir>/live-stream/src/` | Server-side plugin code |
+| `<extensions-dir>/live-stream/overlay/` | Client-side overlay assets |
+| `<control-ui-dir>/` | Overlay files injected here by `inject.sh` |
+
+> Analyze the remote host's directory structure first to determine `<extensions-dir>` and `<control-ui-dir>`. Common locations: `/data/extensions/`, `~/.openclaw/extensions/`, etc.
 
 ---
 

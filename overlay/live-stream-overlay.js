@@ -283,11 +283,13 @@
   position:fixed;bottom:24px;right:24px;width:46px;height:46px;
   border-radius:50%;border:none;
   background:#fff;color:var(--oc-text-2,#5f6672);font-size:18px;
-  cursor:pointer;z-index:99998;
+  cursor:grab;z-index:99998;
   box-shadow:0 2px 12px rgba(0,0,0,0.1),0 0 0 1px rgba(0,0,0,0.06);
   display:none;align-items:center;justify-content:center;
   transition:transform var(--oc-fast),color var(--oc-fast),box-shadow var(--oc-fast);
+  touch-action:none;
 }
+#oc-assist-toggle.oc-dragging{cursor:grabbing;box-shadow:0 6px 24px rgba(0,0,0,0.18),0 0 0 1px rgba(0,0,0,0.08);transform:scale(1.08);}
 #oc-assist-toggle:hover{color:var(--oc-accent);box-shadow:0 4px 20px rgba(0,0,0,0.14),0 0 0 1px rgba(0,151,167,0.3);}
 #oc-assist-toggle.oc-visible{display:flex;animation:oc-fab-in var(--oc-norm) both;}
 @keyframes oc-fab-in{from{opacity:0;transform:scale(.5);}to{opacity:1;transform:scale(1);}}
@@ -800,9 +802,47 @@
   $("oc-btn-close").addEventListener("click", function () {
     overlay.classList.add("oc-hidden"); toggleBtn.classList.add("oc-visible");
   });
-  toggleBtn.addEventListener("click", function () {
-    overlay.classList.remove("oc-hidden"); toggleBtn.classList.remove("oc-visible");
-  });
+  // ── Toggle button drag ──
+  (function () {
+    var dragging = false, hasMoved = false, sx, sy, sl, st;
+    var DRAG_THRESHOLD = 5;
+
+    function start(cx, cy, e) {
+      dragging = true; hasMoved = false;
+      var r = toggleBtn.getBoundingClientRect();
+      sx = cx; sy = cy; sl = r.left; st = r.top;
+      toggleBtn.classList.add("oc-dragging");
+      e.preventDefault();
+    }
+    function move(cx, cy) {
+      if (!dragging) return;
+      var dx = cx - sx, dy = cy - sy;
+      if (!hasMoved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+      hasMoved = true;
+      var x = sl + dx, y = st + dy;
+      x = Math.max(0, Math.min(window.innerWidth - 46, x));
+      y = Math.max(0, Math.min(window.innerHeight - 46, y));
+      toggleBtn.style.left = x + "px";
+      toggleBtn.style.top = y + "px";
+      toggleBtn.style.right = "auto";
+      toggleBtn.style.bottom = "auto";
+    }
+    function end() {
+      if (!dragging) return;
+      dragging = false;
+      toggleBtn.classList.remove("oc-dragging");
+      if (!hasMoved) {
+        overlay.classList.remove("oc-hidden"); toggleBtn.classList.remove("oc-visible");
+      }
+    }
+
+    toggleBtn.addEventListener("mousedown", function (e) { start(e.clientX, e.clientY, e); });
+    document.addEventListener("mousemove", function (e) { move(e.clientX, e.clientY); });
+    document.addEventListener("mouseup", end);
+    toggleBtn.addEventListener("touchstart", function (e) { var t = e.touches[0]; start(t.clientX, t.clientY, e); }, { passive: false });
+    document.addEventListener("touchmove", function (e) { if (!dragging) return; var t = e.touches[0]; move(t.clientX, t.clientY); e.preventDefault(); }, { passive: false });
+    document.addEventListener("touchend", end);
+  })();
 
   // ── Drag ──
   (function () {
